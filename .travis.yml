@@ -1,0 +1,12 @@
+language: rust
+rust:
+  - stable
+  - beta
+
+os:
+  - linux
+  - osx
+
+script:
+  - cargo build --all --all-targets
+  - cargo test --all
