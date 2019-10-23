@@ -29,18 +29,14 @@ pub fn setsid() -> Result<libc::pid_t, libc::pid_t> {
     }
 }
 
-/*
- * The parent forks the child
- * The parent exits
- * The child calls setsid() to start a new session with no controlling terminals
- * The child forks a grandchild
- * The child exits
- * The grandchild is now the daemon
- * ps -axo ppid,pid,pgid,sess,tty,tpgid,stat,uid,user,command | egrep "fork|sleep|PID"
- */
-pub fn daemon() {
-    // TODO
-}
+// TODO - daemon
+// The parent forks the child
+// The parent exits
+// The child calls setsid() to start a new session with no controlling terminals
+// The child forks a grandchild
+// The child exits
+// The grandchild is now the daemon
+// ps -axo ppid,pid,pgid,sess,tty,tpgid,stat,uid,user,command | egrep "fork|sleep|PID"
 
 #[cfg(test)]
 mod tests {
