@@ -1,6 +1,11 @@
 # fork
 
-Library for creating a new process detached from the controling terminal (daemon) using the [fork](https://www.freebsd.org/cgi/man.cgi?fork) and [setsid](https://www.freebsd.org/cgi/man.cgi?setsid) syscalls.
+[![crates.io](https://img.shields.io/crates/v/fork.svg)](https://crates.io/crates/fork)
+[![Build Status](https://travis-ci.org/immortal/fork.svg?branch=master)](https://travis-ci.org/immortal/fork)
+
+Library for creating a new process detached from the controling terminal
+(daemon) using the [fork](https://www.freebsd.org/cgi/man.cgi?fork) and
+[setsid](https://www.freebsd.org/cgi/man.cgi?setsid) syscalls.
 
 ## Why?
 
