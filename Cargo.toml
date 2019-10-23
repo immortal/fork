@@ -1,6 +1,6 @@
 [package]
 name = "fork"
-version = "0.1.1"
+version = "0.1.2"
 authors = ["Nicolas Embriz <nbari@tequila.io>"]
 description = "Library for creating a new process using the fork and setsid syscalls"
 documentation = "https://github.com/immortal/fork"

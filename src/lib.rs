@@ -1,4 +1,5 @@
 use libc;
+use std::process::exit;
 
 pub enum Fork {
     Parent(libc::pid_t),
@@ -29,14 +30,22 @@ pub fn setsid() -> Result<libc::pid_t, libc::pid_t> {
     }
 }
 
-// TODO - daemon
 // The parent forks the child
 // The parent exits
 // The child calls setsid() to start a new session with no controlling terminals
 // The child forks a grandchild
 // The child exits
 // The grandchild is now the daemon
-// ps -axo ppid,pid,pgid,sess,tty,tpgid,stat,uid,user,command | egrep "fork|sleep|PID"
+pub fn daemon() -> Result<Fork, libc::pid_t> {
+    match fork() {
+        Ok(Fork::Parent(_)) => exit(0),
+        Ok(Fork::Child) => match setsid() {
+            Ok(_) => fork(),
+            Err(n) => Err(n),
+        },
+        Err(n) => Err(n),
+    }
+}
 
 #[cfg(test)]
 mod tests {
