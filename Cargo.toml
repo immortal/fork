@@ -1,0 +1,16 @@
+[package]
+name = "fork"
+version = "0.1.0"
+authors = ["Nicolas Embriz <nbari@tequila.io>"]
+description = "Library for creating a new process using the fork and setsid syscalls"
+documentation = "https://github.com/immortal/fork"
+homepage = "https://github.com/immortal/fork"
+repository = "https://github.com/immortal/fork"
+readme = "README.md"
+keywords = ["fork", "setsid", "daemon", "process", "libc"]
+categories = ["command-line-utilities", "os"]
+license-file = "LICENSE"
+edition = "2018"
+
+[dependencies]
+libc = "0.2.65"
