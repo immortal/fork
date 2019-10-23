@@ -15,3 +15,27 @@ created to achieve the same goal, inspired by ["nix - Rust friendly bindings to
 *nix APIs crate"](https://crates.io/crates/nix).
 - Minimal library to daemonize, fork, double-fork a process
 - Learn Rust :crab:
+
+Example:
+
+```rs
+use fork::{daemon, Fork};
+use std::process::{id, Command};
+
+fn main() {
+    if let Ok(Fork::Child) = daemon() {
+        println!("my pid {}", id());
+        Command::new("sleep")
+            .arg("300")
+            .output()
+            .expect("failed to execute process");
+    }
+}
+```
+
+```pre
+$ ps -axo ppid,pid,pgid,sess,tty,tpgid,stat,uid,%mem,%cpu,command, | egrep "fork|sleep|PID"
+ PPID   PID  PGID   SESS TTY      TPGID STAT   UID       %MEM  %CPU COMMAND
+    1 48738 48737      0 ??           0 S      501        0.0   0.0 target/debug/fork
+48738 48753 48737      0 ??           0 S      501        0.0   0.0 sleep 300
+```
