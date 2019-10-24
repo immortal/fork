@@ -50,10 +50,8 @@ mod tests {
 
     #[test]
     fn test_fork() {
-        match fork() {
-            Ok(Fork::Parent(child)) => assert!(child > 0),
-            Ok(Fork::Child) => println!("child process"),
-            Err(_) => assert!(false),
+        if let Ok(Fork::Parent(child)) = fork() {
+            assert!(child > 0);
         }
     }
 }
