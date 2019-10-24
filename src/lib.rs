@@ -39,10 +39,7 @@ pub fn setsid() -> Result<libc::pid_t, libc::pid_t> {
 pub fn daemon() -> Result<Fork, libc::pid_t> {
     match fork() {
         Ok(Fork::Parent(_)) => exit(0),
-        Ok(Fork::Child) => match setsid() {
-            Ok(_) => fork(),
-            Err(n) => Err(n),
-        },
+        Ok(Fork::Child) => setsid().and_then(|_| fork()),
         Err(n) => Err(n),
     }
 }
