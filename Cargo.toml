@@ -1,8 +1,8 @@
 [package]
 name = "fork"
-version = "0.1.3"
+version = "0.1.4"
 authors = ["Nicolas Embriz <nbari@tequila.io>"]
-description = "Library for creating a new process using the fork and setsid syscalls"
+description = "Library for creating a new process detached from the controling terminal (daemon)"
 documentation = "https://github.com/immortal/fork"
 homepage = "https://github.com/immortal/fork"
 repository = "https://github.com/immortal/fork"

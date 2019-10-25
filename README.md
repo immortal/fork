@@ -23,7 +23,7 @@ use fork::{daemon, Fork};
 use std::process::{id, Command};
 
 fn main() {
-    if let Ok(Fork::Child) = daemon() {
+    if let Ok(Fork::Child) = daemon(false, false) {
         println!("my pid {}", id());
         Command::new("sleep")
             .arg("300")
@@ -32,6 +32,9 @@ fn main() {
     }
 }
 ```
+
+If using `daemon(false, false)`,it will `chdir` to `/` and close the standard
+input, standard output, and standard error file descriptors.
 
 ```pre
 $ ps -axo ppid,pid,pgid,sess,tty,tpgid,stat,uid,%mem,%cpu,command, | egrep "fork|sleep|PID"

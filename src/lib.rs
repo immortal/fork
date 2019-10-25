@@ -43,6 +43,21 @@ pub fn chdir() -> Result<libc::c_int, ()> {
     }
 }
 
+// close file descriptors
+// TODO research about redirect to /dev/null or keep them close for simplicity
+pub fn close_fd() -> Result<(), ()> {
+    match unsafe { libc::close(0) } {
+        -1 => Err(()),
+        _ => match unsafe { libc::close(1) } {
+            -1 => Err(()),
+            _ => match unsafe { libc::close(2) } {
+                -1 => Err(()),
+                _ => Ok(()),
+            },
+        },
+    }
+}
+
 // The parent forks the child
 // The parent exits
 // The child calls setsid() to start a new session with no controlling terminals
@@ -50,15 +65,18 @@ pub fn chdir() -> Result<libc::c_int, ()> {
 // The child exits
 // The grandchild is now the daemon
 // nochdir = false, changes the current working directory to the root (/).
-pub fn daemon(nochdir: bool) -> Result<Fork, ()> {
+// noclose = false: will close standard input, standard output, and standard error
+pub fn daemon(nochdir: bool, noclose: bool) -> Result<Fork, ()> {
     match fork() {
         Ok(Fork::Parent(_)) => exit(0),
         Ok(Fork::Child) => setsid().and_then(|_| {
-            if nochdir {
-                fork()
-            } else {
-                chdir().and_then(|_| fork())
+            if !nochdir {
+                chdir()?;
             }
+            if !noclose {
+                close_fd()?;
+            }
+            fork()
         }),
         Err(n) => Err(n),
     }
