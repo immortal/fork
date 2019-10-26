@@ -20,11 +20,10 @@ Example:
 
 ```rs
 use fork::{daemon, Fork};
-use std::process::{id, Command};
+use std::process::Command;
 
 fn main() {
     if let Ok(Fork::Child) = daemon(false, false) {
-        println!("my pid {}", id());
         Command::new("sleep")
             .arg("300")
             .output()
