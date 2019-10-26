@@ -1,3 +1,20 @@
+//! Library for creating a new process detached from the controling terminal (daemon)
+//!
+//! Example:
+//! ```
+//!use fork::{daemon, Fork};
+//!use std::process::Command;
+//!
+//!fn main() {
+//!    if let Ok(Fork::Child) = daemon(false, false) {
+//!        Command::new("sleep")
+//!            .arg("300")
+//!            .output()
+//!            .expect("failed to execute process");
+//!    }
+//!}
+//!```
+
 use libc;
 use std::ffi::CString;
 use std::process::exit;
