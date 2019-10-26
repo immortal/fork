@@ -1,6 +1,6 @@
 [package]
 name = "fork"
-version = "0.1.4"
+version = "0.1.5"
 authors = ["Nicolas Embriz <nbari@tequila.io>"]
 description = "Library for creating a new process detached from the controling terminal (daemon)"
 documentation = "https://github.com/immortal/fork"
@@ -11,6 +11,9 @@ keywords = ["fork", "setsid", "daemon", "process", "libc"]
 categories = ["command-line-utilities", "os"]
 license-file = "LICENSE"
 edition = "2018"
+
+[badges]
+travis-ci = { repository = "immortal/fork", branch = "master" }
 
 [dependencies]
 libc = "0.2.65"
