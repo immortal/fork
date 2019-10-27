@@ -23,7 +23,7 @@ use fork::{daemon, Fork};
 use std::process::Command;
 
 fn main() {
-    if let Ok(Fork::Child) = daemon(true, true) {
+    if let Ok(Fork::Child) = daemon(false, false) {
         Command::new("sleep")
             .arg("300")
             .output()
@@ -32,7 +32,7 @@ fn main() {
 }
 ```
 
-If using `daemon(true, true)`,it will `chdir` to `/` and close the standard
+If using `daemon(false, false)`,it will `chdir` to `/` and close the standard
 input, standard output, and standard error file descriptors.
 
 ```pre

@@ -6,7 +6,7 @@
 //!use std::process::Command;
 //!
 //!fn main() {
-//!    if let Ok(Fork::Child) = daemon(true, true) {
+//!    if let Ok(Fork::Child) = daemon(false, false) {
 //!        Command::new("sleep")
 //!            .arg("300")
 //!            .output()
@@ -78,8 +78,8 @@ pub fn close_fd() -> Result<(), ()> {
 /// The daemon function is for programs wishing to detach themselves from the
 /// controlling terminal and run in the background as system daemons.
 ///
-/// * `cd = true`, changes the current working directory to the root (`/`).
-/// * `close = true`, will close standard input, standard output, and standard error
+/// * `nochdir = false`, changes the current working directory to the root (`/`).
+/// * `noclose = false`, will close standard input, standard output, and standard error
 ///
 /// Example:
 ///
@@ -94,7 +94,7 @@ pub fn close_fd() -> Result<(), ()> {
 ///use std::process::Command;
 ///
 ///fn main() {
-///    if let Ok(Fork::Child) = daemon(true, true) {
+///    if let Ok(Fork::Child) = daemon(false, false) {
 ///        Command::new("sleep")
 ///            .arg("300")
 ///            .output()
@@ -102,14 +102,14 @@ pub fn close_fd() -> Result<(), ()> {
 ///    }
 ///}
 ///```
-pub fn daemon(cd: bool, close: bool) -> Result<Fork, ()> {
+pub fn daemon(nochdir: bool, noclose: bool) -> Result<Fork, ()> {
     match fork() {
         Ok(Fork::Parent(_)) => exit(0),
         Ok(Fork::Child) => setsid().and_then(|_| {
-            if cd {
+            if !nochdir {
                 chdir()?;
             }
-            if close {
+            if !noclose {
                 close_fd()?;
             }
             fork()
