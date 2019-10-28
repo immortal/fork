@@ -49,6 +49,8 @@ Use `ps` to check the process, for example:
 
     $ ps -axo ppid,pid,pgid,sess,tty,tpgid,stat,uid,%mem,%cpu,command, | egrep "fork|sleep|PID"
 
+> `egrep` is used to show the `ps` headers
+
 Output should be something like:
 
 ```pre
@@ -61,6 +63,6 @@ Output should be something like:
 * `TTY = ??` no controlling terminal
 * new `PGID = 48737`
 
-      1 - root (initd/launchd)
+      1 - root (init/launchd)
        \-- 48738 fork         PGID - 48737
         \--- 48753 sleep      PGID - 48737
