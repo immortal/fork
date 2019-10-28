@@ -8,7 +8,7 @@
 //!fn main() {
 //!    if let Ok(Fork::Child) = daemon(false, false) {
 //!        Command::new("sleep")
-//!            .arg("300")
+//!            .arg("3")
 //!            .output()
 //!            .expect("failed to execute process");
 //!    }
@@ -23,30 +23,6 @@ use std::process::exit;
 pub enum Fork {
     Parent(libc::pid_t),
     Child,
-}
-
-/// Upon successful completion, fork() returns a value of 0 to the child process
-/// and returns the process ID of the child process to the parent process.
-/// Otherwise, a value of -1 is returned to the parent process, no child process
-/// is created.
-pub fn fork() -> Result<Fork, ()> {
-    let res = unsafe { libc::fork() };
-    match res {
-        -1 => Err(()),
-        0 => Ok(Fork::Child),
-        res => Ok(Fork::Parent(res)),
-    }
-}
-
-/// Upon successful completion, the setsid() system call returns the value of the
-/// process group ID of the new process group, which is the same as the process ID
-/// of the calling process. If an error occurs, setsid() returns -1
-pub fn setsid() -> Result<libc::pid_t, ()> {
-    let res = unsafe { libc::setsid() };
-    match res {
-        -1 => Err(()),
-        res => Ok(res),
-    }
 }
 
 /// Upon successful completion, 0 shall be returned. Otherwise, -1 shall be
@@ -75,6 +51,40 @@ pub fn close_fd() -> Result<(), ()> {
     }
 }
 
+/// Upon successful completion, fork() returns a value of 0 to the child process
+/// and returns the process ID of the child process to the parent process.
+/// Otherwise, a value of -1 is returned to the parent process, no child process
+/// is created.
+/// Example:
+///
+/// ```
+///use fork::{fork, Fork};
+///
+///fn main() {
+///     if let Ok(Fork::Parent(child)) = fork() {
+///         assert!(child > 0);
+///      }
+///}
+pub fn fork() -> Result<Fork, ()> {
+    let res = unsafe { libc::fork() };
+    match res {
+        -1 => Err(()),
+        0 => Ok(Fork::Child),
+        res => Ok(Fork::Parent(res)),
+    }
+}
+
+/// Upon successful completion, the setsid() system call returns the value of the
+/// process group ID of the new process group, which is the same as the process ID
+/// of the calling process. If an error occurs, setsid() returns -1
+pub fn setsid() -> Result<libc::pid_t, ()> {
+    let res = unsafe { libc::setsid() };
+    match res {
+        -1 => Err(()),
+        res => Ok(res),
+    }
+}
+
 /// The daemon function is for programs wishing to detach themselves from the
 /// controlling terminal and run in the background as system daemons.
 ///
@@ -96,7 +106,7 @@ pub fn close_fd() -> Result<(), ()> {
 ///fn main() {
 ///    if let Ok(Fork::Child) = daemon(false, false) {
 ///        Command::new("sleep")
-///            .arg("300")
+///            .arg("3")
 ///            .output()
 ///            .expect("failed to execute process");
 ///    }
@@ -114,7 +124,7 @@ pub fn daemon(nochdir: bool, noclose: bool) -> Result<Fork, ()> {
             }
             fork()
         }),
-        Err(n) => Err(n),
+        Err(_) => Err(()),
     }
 }
 
