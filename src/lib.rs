@@ -1,4 +1,4 @@
-//! Library for creating a new process detached from the controling terminal (daemon)
+//! Library for creating a new process detached from the controling terminal (daemon).
 //!
 //! Example:
 //! ```
@@ -28,23 +28,23 @@ pub enum Fork {
 /// Upon successful completion, 0 shall be returned. Otherwise, -1 shall be
 /// returned, the current working directory shall remain unchanged, and errno
 /// shall be set to indicate the error.
-pub fn chdir() -> Result<libc::c_int, ()> {
+pub fn chdir() -> Result<libc::c_int, i32> {
     let dir = CString::new("/").expect("CString::new failed");
     let res = unsafe { libc::chdir(dir.as_ptr()) };
     match res {
-        -1 => Err(()),
+        -1 => Err(-1),
         res => Ok(res),
     }
 }
 
 /// close file descriptors stdin,stdout,stderr
-pub fn close_fd() -> Result<(), ()> {
+pub fn close_fd() -> Result<(), i32> {
     match unsafe { libc::close(0) } {
-        -1 => Err(()),
+        -1 => Err(-1),
         _ => match unsafe { libc::close(1) } {
-            -1 => Err(()),
+            -1 => Err(-1),
             _ => match unsafe { libc::close(2) } {
-                -1 => Err(()),
+                -1 => Err(-1),
                 _ => Ok(()),
             },
         },
@@ -65,10 +65,10 @@ pub fn close_fd() -> Result<(), ()> {
 ///         assert!(child > 0);
 ///      }
 ///}
-pub fn fork() -> Result<Fork, ()> {
+pub fn fork() -> Result<Fork, i32> {
     let res = unsafe { libc::fork() };
     match res {
-        -1 => Err(()),
+        -1 => Err(-1),
         0 => Ok(Fork::Child),
         res => Ok(Fork::Parent(res)),
     }
@@ -77,10 +77,10 @@ pub fn fork() -> Result<Fork, ()> {
 /// Upon successful completion, the setsid() system call returns the value of the
 /// process group ID of the new process group, which is the same as the process ID
 /// of the calling process. If an error occurs, setsid() returns -1
-pub fn setsid() -> Result<libc::pid_t, ()> {
+pub fn setsid() -> Result<libc::pid_t, i32> {
     let res = unsafe { libc::setsid() };
     match res {
-        -1 => Err(()),
+        -1 => Err(-1),
         res => Ok(res),
     }
 }
@@ -112,7 +112,7 @@ pub fn setsid() -> Result<libc::pid_t, ()> {
 ///    }
 ///}
 ///```
-pub fn daemon(nochdir: bool, noclose: bool) -> Result<Fork, ()> {
+pub fn daemon(nochdir: bool, noclose: bool) -> Result<Fork, i32> {
     match fork() {
         Ok(Fork::Parent(_)) => exit(0),
         Ok(Fork::Child) => setsid().and_then(|_| {
@@ -124,7 +124,7 @@ pub fn daemon(nochdir: bool, noclose: bool) -> Result<Fork, ()> {
             }
             fork()
         }),
-        Err(_) => Err(()),
+        Err(n) => Err(n),
     }
 }
 

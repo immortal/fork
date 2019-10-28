@@ -17,7 +17,9 @@ Example:
 
 Create a new test project:
 
-    cargo new --bin fork
+    $ cargo new --bin fork
+
+> To install `cargo` use: `curl https://sh.rustup.rs -sSf | sh`
 
 Edit `fork/Cargo.toml` and add to `[dependecies]`:
 
