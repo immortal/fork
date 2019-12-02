@@ -103,9 +103,9 @@ pub fn close_fd() -> Result<(), i32> {
 /// The thing to note is that you end up with two processes continuing execution
 /// immediately after the fork call but with different match arms.
 ///
-/// # [nix::unistd::fork](https://docs.rs/nix/0.15.0/nix/unistd/fn.fork.html)
+/// # [`nix::unistd::fork`](https://docs.rs/nix/0.15.0/nix/unistd/fn.fork.html)
 ///
-/// The example has been taken from the [nix::unistd::fork](https://docs.rs/nix/0.15.0/nix/unistd/fn.fork.html),
+/// The example has been taken from the [`nix::unistd::fork`](https://docs.rs/nix/0.15.0/nix/unistd/fn.fork.html),
 /// please check the [Safety](https://docs.rs/nix/0.15.0/nix/unistd/fn.fork.html#safety) section
 pub fn fork() -> Result<Fork, i32> {
     let res = unsafe { libc::fork() };
