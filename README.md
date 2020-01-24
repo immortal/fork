@@ -2,6 +2,7 @@
 
 [![crates.io](https://img.shields.io/crates/v/fork.svg)](https://crates.io/crates/fork)
 [![Build Status](https://travis-ci.org/immortal/fork.svg?branch=master)](https://travis-ci.org/immortal/fork)
+[![docs](https://docs.rs/fork/badge.svg)](https://docs.rs/fork)
 
 Library for creating a new process detached from the controling terminal (daemon).
 
