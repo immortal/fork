@@ -25,7 +25,6 @@ pub enum Fork {
 
 /// Change dir to `/` [see chdir(2)](https://www.freebsd.org/cgi/man.cgi?query=chdir&sektion=2)
 ///
-/// # Errors
 /// Upon successful completion, 0 shall be returned. Otherwise, -1 shall be
 /// returned, the current working directory shall remain unchanged, and errno
 /// shall be set to indicate the error.
@@ -44,6 +43,9 @@ pub enum Fork {
 ///    _ => panic!(),
 ///}
 ///```
+///
+/// # Errors
+/// returns `-1` if error
 pub fn chdir() -> Result<libc::c_int, i32> {
     let dir = CString::new("/").expect("CString::new failed");
     let res = unsafe { libc::chdir(dir.as_ptr()) };
@@ -53,8 +55,10 @@ pub fn chdir() -> Result<libc::c_int, i32> {
     }
 }
 
+/// Close file descriptors stdin,stdout,stderr
+///
 /// # Errors
-/// close file descriptors stdin,stdout,stderr, returns -1 if error
+/// returns `-1` if error
 pub fn close_fd() -> Result<(), i32> {
     match unsafe { libc::close(0) } {
         -1 => Err(-1),
@@ -70,7 +74,6 @@ pub fn close_fd() -> Result<(), i32> {
 
 /// Create a new child process [see fork(2)](https://www.freebsd.org/cgi/man.cgi?fork)
 ///
-/// # Errors
 /// Upon successful completion, fork() returns a value of 0 to the child process
 /// and returns the process ID of the child process to the parent process.
 /// Otherwise, a value of -1 is returned to the parent process, no child process
@@ -103,6 +106,9 @@ pub fn close_fd() -> Result<(), i32> {
 ///
 /// The example has been taken from the [`nix::unistd::fork`](https://docs.rs/nix/0.15.0/nix/unistd/fn.fork.html),
 /// please check the [Safety](https://docs.rs/nix/0.15.0/nix/unistd/fn.fork.html#safety) section
+///
+/// # Errors
+/// returns `-1` if error
 pub fn fork() -> Result<Fork, i32> {
     let res = unsafe { libc::fork() };
     match res {
@@ -114,10 +120,12 @@ pub fn fork() -> Result<Fork, i32> {
 
 /// Create session and set process group ID [see setsid(2)](https://www.freebsd.org/cgi/man.cgi?setsid)
 ///
-/// # Errors
 /// Upon successful completion, the setsid() system call returns the value of the
 /// process group ID of the new process group, which is the same as the process ID
 /// of the calling process. If an error occurs, setsid() returns -1
+///
+/// # Errors
+/// returns `-1` if error
 pub fn setsid() -> Result<libc::pid_t, i32> {
     let res = unsafe { libc::setsid() };
     match res {
