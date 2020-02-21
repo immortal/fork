@@ -5,13 +5,11 @@
 //!use fork::{daemon, Fork};
 //!use std::process::Command;
 //!
-//!fn main() {
-//!    if let Ok(Fork::Child) = daemon(false, false) {
-//!        Command::new("sleep")
-//!            .arg("3")
-//!            .output()
-//!            .expect("failed to execute process");
-//!    }
+//!if let Ok(Fork::Child) = daemon(false, false) {
+//!    Command::new("sleep")
+//!        .arg("3")
+//!        .output()
+//!        .expect("failed to execute process");
 //!}
 //!```
 
@@ -27,6 +25,7 @@ pub enum Fork {
 
 /// Change dir to `/` [see chdir(2)](https://www.freebsd.org/cgi/man.cgi?query=chdir&sektion=2)
 ///
+/// # Errors
 /// Upon successful completion, 0 shall be returned. Otherwise, -1 shall be
 /// returned, the current working directory shall remain unchanged, and errno
 /// shall be set to indicate the error.
@@ -37,17 +36,14 @@ pub enum Fork {
 ///use fork::chdir;
 ///use std::env;
 ///
-///fn main() {
-///    match chdir() {
-///        Ok(_) => {
-///           let path = env::current_dir().expect("failed current_dir");
-///           assert_eq!(Some("/"), path.to_str());
-///        }
-///        _ => panic!(),
+///match chdir() {
+///    Ok(_) => {
+///       let path = env::current_dir().expect("failed current_dir");
+///       assert_eq!(Some("/"), path.to_str());
 ///    }
+///    _ => panic!(),
 ///}
 ///```
-///
 pub fn chdir() -> Result<libc::c_int, i32> {
     let dir = CString::new("/").expect("CString::new failed");
     let res = unsafe { libc::chdir(dir.as_ptr()) };
@@ -57,6 +53,7 @@ pub fn chdir() -> Result<libc::c_int, i32> {
     }
 }
 
+/// # Errors
 /// close file descriptors stdin,stdout,stderr, returns -1 if error
 pub fn close_fd() -> Result<(), i32> {
     match unsafe { libc::close(0) } {
@@ -73,6 +70,7 @@ pub fn close_fd() -> Result<(), i32> {
 
 /// Create a new child process [see fork(2)](https://www.freebsd.org/cgi/man.cgi?fork)
 ///
+/// # Errors
 /// Upon successful completion, fork() returns a value of 0 to the child process
 /// and returns the process ID of the child process to the parent process.
 /// Otherwise, a value of -1 is returned to the parent process, no child process
@@ -83,14 +81,12 @@ pub fn close_fd() -> Result<(), i32> {
 /// ```
 ///use fork::{fork, Fork};
 ///
-///fn main() {
-///    match fork() {
-///        Ok(Fork::Parent(child)) => {
-///            println!("Continuing execution in parent process, new child has pid: {}", child);
-///        }
-///        Ok(Fork::Child) => println!("I'm a new child process"),
-///        Err(_) => println!("Fork failed"),
+///match fork() {
+///    Ok(Fork::Parent(child)) => {
+///        println!("Continuing execution in parent process, new child has pid: {}", child);
 ///    }
+///    Ok(Fork::Child) => println!("I'm a new child process"),
+///    Err(_) => println!("Fork failed"),
 ///}
 ///```
 /// This will print something like the following (order indeterministic).
@@ -118,6 +114,7 @@ pub fn fork() -> Result<Fork, i32> {
 
 /// Create session and set process group ID [see setsid(2)](https://www.freebsd.org/cgi/man.cgi?setsid)
 ///
+/// # Errors
 /// Upon successful completion, the setsid() system call returns the value of the
 /// process group ID of the new process group, which is the same as the process ID
 /// of the calling process. If an error occurs, setsid() returns -1
@@ -135,6 +132,9 @@ pub fn setsid() -> Result<libc::pid_t, i32> {
 /// * `nochdir = false`, changes the current working directory to the root (`/`).
 /// * `noclose = false`, will close standard input, standard output, and standard error
 ///
+/// # Errors
+/// If an error occurs, returns -1
+///
 /// Example:
 ///
 ///```
@@ -147,13 +147,11 @@ pub fn setsid() -> Result<libc::pid_t, i32> {
 ///use fork::{daemon, Fork};
 ///use std::process::Command;
 ///
-///fn main() {
-///    if let Ok(Fork::Child) = daemon(false, false) {
-///        Command::new("sleep")
-///            .arg("3")
-///            .output()
-///            .expect("failed to execute process");
-///    }
+///if let Ok(Fork::Child) = daemon(false, false) {
+///    Command::new("sleep")
+///        .arg("3")
+///        .output()
+///        .expect("failed to execute process");
 ///}
 ///```
 pub fn daemon(nochdir: bool, noclose: bool) -> Result<Fork, i32> {
