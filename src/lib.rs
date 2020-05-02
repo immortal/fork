@@ -13,7 +13,6 @@
 //!}
 //!```
 
-use libc;
 use std::ffi::CString;
 use std::process::exit;
 
@@ -180,7 +179,7 @@ pub fn daemon(nochdir: bool, noclose: bool) -> Result<Fork, i32> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{fork, Fork};
 
     #[test]
     fn test_fork() {
