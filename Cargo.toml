@@ -1,13 +1,13 @@
 [package]
 name = "fork"
-version = "0.1.15"
+version = "0.1.16"
 authors = ["Nicolas Embriz <nbari@tequila.io>"]
 description = "Library for creating a new process detached from the controling terminal (daemon)"
 documentation = "https://docs.rs/fork/latest/fork/"
 homepage = "https://docs.rs/fork/latest/fork/"
 repository = "https://github.com/immortal/fork"
 readme = "README.md"
-keywords = ["fork", "setsid", "daemon", "process", "libc"]
+keywords = ["fork", "setsid", "daemon", "process", "daemonize"]
 categories = ["command-line-utilities", "os"]
 license-file = "LICENSE"
 edition = "2018"
@@ -16,4 +16,4 @@ edition = "2018"
 travis-ci = { repository = "immortal/fork", branch = "master" }
 
 [dependencies]
-libc = "0.2.71"
+libc = "0.2.73"

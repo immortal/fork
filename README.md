@@ -8,11 +8,10 @@ Library for creating a new process detached from the controling terminal (daemon
 
 ## Why?
 
-- [daemon(3)](http://man7.org/linux/man-pages/man3/daemon.3.html) has been
+- Minimal library to daemonize, fork, double-fork a process.
+- [daemon(3)](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man3/daemon.3.html) has been
 deprecated in MacOSX 10.5, by using `fork` and `setsid` syscalls, new methods
-could be created to achieve the same goal, inspired by
-["nix - Rust friendly bindings to *nix APIs crate"](https://crates.io/crates/nix).
-- Minimal library to daemonize, fork, double-fork a process
+can be created to achieve the same goal.
 
 Example:
 
