@@ -1,6 +1,6 @@
 [package]
 name = "fork"
-version = "0.1.16"
+version = "0.1.17"
 authors = ["Nicolas Embriz <nbari@tequila.io>"]
 description = "Library for creating a new process detached from the controling terminal (daemon)"
 documentation = "https://docs.rs/fork/latest/fork/"

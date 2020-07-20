@@ -133,6 +133,18 @@ pub fn setsid() -> Result<libc::pid_t, i32> {
     }
 }
 
+/// The process group of the current process [see getgrp(2)](https://www.freebsd.org/cgi/man.cgi?query=getpgrp)
+///
+/// # Errors
+/// returns `-1` if error
+pub fn getpgrp() -> Result<libc::pid_t, i32> {
+    let res = unsafe { libc::getpgrp() };
+    match res {
+        -1 => Err(-1),
+        res => Ok(res),
+    }
+}
+
 /// The daemon function is for programs wishing to detach themselves from the
 /// controlling terminal and run in the background as system daemons.
 ///
