@@ -4,7 +4,7 @@
 [![Build Status](https://travis-ci.org/immortal/fork.svg?branch=master)](https://travis-ci.org/immortal/fork)
 [![docs](https://docs.rs/fork/badge.svg)](https://docs.rs/fork)
 
-Library for creating a new process detached from the controling terminal (daemon).
+Library for creating a new process detached from the controlling terminal (daemon).
 
 ## Why?
 
@@ -21,7 +21,7 @@ Create a new test project:
 
 > To install `cargo` use: `curl https://sh.rustup.rs -sSf | sh`
 
-Edit `fork/Cargo.toml` and add to `[dependecies]`:
+Edit `fork/Cargo.toml` and add to `[dependencies]`:
 
     fork = "0.1"
 

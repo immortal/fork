@@ -1,4 +1,4 @@
-//! Library for creating a new process detached from the controling terminal (daemon).
+//! Library for creating a new process detached from the controlling terminal (daemon).
 //!
 //! Example:
 //! ```
