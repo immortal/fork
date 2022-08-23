@@ -1,6 +1,6 @@
 [package]
 name = "fork"
-version = "0.1.19"
+version = "0.1.20"
 authors = ["Nicolas Embriz <nbari@tequila.io>"]
 description = "Library for creating a new process detached from the controlling terminal (daemon)"
 documentation = "https://docs.rs/fork/latest/fork/"
@@ -16,4 +16,4 @@ edition = "2018"
 travis-ci = { repository = "immortal/fork", branch = "master" }
 
 [dependencies]
-libc = "0.2.119"
+libc = "0.2.132"
