@@ -1,7 +1,8 @@
 # fork
 
 [![crates.io](https://img.shields.io/crates/v/fork.svg)](https://crates.io/crates/fork)
-[![Build Status](https://travis-ci.org/immortal/fork.svg?branch=master)](https://travis-ci.org/immortal/fork)
+[![Build](https://github.com/immortal/fork/actions/workflows/build.yml/badge.svg)](https://github.com/immortal/fork/actions/workflows/build.yml)
+[![codecov](https://codecov.io/gh/immortal/fork/graph/badge.svg?token=LHZW56OC10)](https://codecov.io/gh/immortal/fork)
 [![docs](https://docs.rs/fork/badge.svg)](https://docs.rs/fork)
 
 Library for creating a new process detached from the controlling terminal (daemon).
