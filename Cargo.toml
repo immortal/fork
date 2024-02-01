@@ -9,7 +9,7 @@ repository = "https://github.com/immortal/fork"
 readme = "README.md"
 keywords = ["fork", "setsid", "daemon", "process", "daemonize"]
 categories = ["command-line-utilities", "os"]
-license-file = "BSD-3-Clause"
+license = "BSD-3-Clause"
 edition = "2021"
 
 [dependencies]
