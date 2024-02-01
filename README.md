@@ -18,15 +18,19 @@ Example:
 
 Create a new test project:
 
-    $ cargo new --bin fork
+    $ cargo new --bin myapp
 
 > To install `cargo` use: `curl https://sh.rustup.rs -sSf | sh`
 
-Edit `fork/Cargo.toml` and add to `[dependencies]`:
+Add `fork` as a depdendecie:
+
+    cargo add fork
+
+or Edit `myapp/Cargo.toml` and add to `[dependencies]`:
 
     fork = "0.1"
 
-Add the following code to `fork/main.rs`
+Add the following code to `myapp/main.rs`
 
 ```rs
 use fork::{daemon, Fork};
@@ -50,7 +54,7 @@ Test running:
 
 Use `ps` to check the process, for example:
 
-    $ ps -axo ppid,pid,pgid,sess,tty,tpgid,stat,uid,%mem,%cpu,command, | egrep "fork|sleep|PID"
+    $ ps -axo ppid,pid,pgid,sess,tty,tpgid,stat,uid,%mem,%cpu,command, | egrep "myapp|sleep|PID"
 
 > `egrep` is used to show the `ps` headers
 
@@ -58,7 +62,7 @@ Output should be something like:
 
 ```pre
  PPID   PID  PGID   SESS TTY      TPGID STAT   UID       %MEM  %CPU COMMAND
-    1 48738 48737      0 ??           0 S      501        0.0   0.0 target/debug/fork
+    1 48738 48737      0 ??           0 S      501        0.0   0.0 target/debug/myapp
 48738 48753 48737      0 ??           0 S      501        0.0   0.0 sleep 300
 ```
 
@@ -67,5 +71,5 @@ Output should be something like:
 * new `PGID = 48737`
 
       1 - root (init/launchd)
-       \-- 48738 fork         PGID - 48737
+       \-- 48738 myapp        PGID - 48737
         \--- 48753 sleep      PGID - 48737
