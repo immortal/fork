@@ -117,6 +117,14 @@ pub fn fork() -> Result<Fork, i32> {
     }
 }
 
+pub fn wait(pid: i32) -> Result<(), i32> {
+    let res = unsafe { libc::wait(pid) };
+    match res {
+        -1 => Err(-1),
+        0 => Ok(()),
+    }
+}
+
 /// Create session and set process group ID [see setsid(2)](https://www.freebsd.org/cgi/man.cgi?setsid)
 ///
 /// Upon successful completion, the setsid() system call returns the value of the
