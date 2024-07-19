@@ -45,6 +45,8 @@ pub enum Fork {
 ///
 /// # Errors
 /// returns `-1` if error
+/// # Panics
+/// Panics if `CString::new` fails
 pub fn chdir() -> Result<libc::c_int, i32> {
     let dir = CString::new("/").expect("CString::new failed");
     let res = unsafe { libc::chdir(dir.as_ptr()) };
@@ -73,7 +75,7 @@ pub fn close_fd() -> Result<(), i32> {
 
 /// Create a new child process [see fork(2)](https://www.freebsd.org/cgi/man.cgi?fork)
 ///
-/// Upon successful completion, fork() returns a value of 0 to the child process
+/// Upon successful completion, `fork()` returns a value of 0 to the child process
 /// and returns the process ID of the child process to the parent process.
 /// Otherwise, a value of -1 is returned to the parent process, no child process
 /// is created.
@@ -117,11 +119,52 @@ pub fn fork() -> Result<Fork, i32> {
     }
 }
 
+/// Wait for process to change status [see wait(2)](https://man.freebsd.org/cgi/man.cgi?waitpid)
+///
+/// # Errors
+/// returns `-1` if error
+///
+/// Example:
+///
+/// ```
+///use fork::{waitpid, Fork};
+///use std::process::Command;
+///
+///fn main() {
+///  match fork::fork() {
+///     Ok(Fork::Parent(pid)) => {
+///
+///         println!("Child pid: {pid}");
+///
+///         match waitpid(pid) {
+///             Ok(_) => println!("Child existed"),
+///             Err(_) => eprintln!("Failted to wait on child"),
+///         }
+///     }
+///     Ok(Fork::Child) => {
+///         Command::new("sleep")
+///             .arg("1")
+///             .output()
+///             .expect("failed to execute process");
+///     }
+///     Err(_) => eprintln!("Failed to fork"),
+///  }
+///}
+///```
+pub fn waitpid(pid: i32) -> Result<(), i32> {
+    let mut status: i32 = 0;
+    let res = unsafe { libc::waitpid(pid, &mut status, 0) };
+    match res {
+        -1 => Err(-1),
+        _ => Ok(()),
+    }
+}
+
 /// Create session and set process group ID [see setsid(2)](https://www.freebsd.org/cgi/man.cgi?setsid)
 ///
-/// Upon successful completion, the setsid() system call returns the value of the
+/// Upon successful completion, the `setsid()` system call returns the value of the
 /// process group ID of the new process group, which is the same as the process ID
-/// of the calling process. If an error occurs, setsid() returns -1
+/// of the calling process. If an error occurs, `setsid()` returns -1
 ///
 /// # Errors
 /// returns `-1` if error
