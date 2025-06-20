@@ -17,6 +17,7 @@ fn main() {
             OpenOptions::new()
                 .write(true)
                 .create(true)
+                .truncate(true)
                 .open(file_name)
                 .expect("failed to open file");
         }
