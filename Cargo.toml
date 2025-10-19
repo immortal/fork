@@ -8,7 +8,7 @@ homepage = "https://docs.rs/fork/latest/fork/"
 repository = "https://github.com/immortal/fork"
 readme = "README.md"
 keywords = ["fork", "setsid", "daemon", "process", "daemonize"]
-categories = ["command-line-utilities", "os"]
+categories = ["os::unix-apis", "api-bindings"]
 license = "BSD-3-Clause"
 edition = "2024"
 
