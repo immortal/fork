@@ -13,7 +13,7 @@
 
 mod common;
 
-use common::{get_test_dir, setup_test_dir};
+use common::{get_test_dir, setup_test_dir, wait_for_file};
 use fork::{Fork, chdir, fork, getpgrp, setsid};
 use std::{env, fs, process::exit, thread, time::Duration};
 
@@ -25,11 +25,12 @@ fn test_double_fork_daemon_pattern() {
     // First fork
     match fork().expect("First fork failed") {
         Fork::Parent(_child) => {
-            // Original parent waits for first child
-            thread::sleep(Duration::from_millis(150));
-
-            // Daemon should have written its PID
-            assert!(daemon_pid_file.exists(), "Daemon PID file should exist");
+            // Original parent waits for daemon to create PID file
+            // Use longer timeout for CI environments
+            assert!(
+                wait_for_file(&daemon_pid_file, 1000),
+                "Daemon PID file should exist"
+            );
 
             // Tests the classic double-fork daemon pattern
             // Expected behavior:

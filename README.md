@@ -198,16 +198,3 @@ Contributions are welcome! Please ensure:
 ## License
 
 BSD 3-Clause License - see [LICENSE](LICENSE) file for details.
-
-## Related Projects
-
-- [nix](https://crates.io/crates/nix) - Higher-level Unix API bindings
-- [daemonize](https://crates.io/crates/daemonize) - Alternative daemonization library
-
-## Changelog
-
-See [CHANGELOG.md](CHANGELOG.md) for release history.
-
----
-
-**Current version: 0.3.0** | **Minimum Rust version: 1.70** | **Edition: 2024**
