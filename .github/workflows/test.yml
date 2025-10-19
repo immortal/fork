@@ -59,6 +59,14 @@ jobs:
       - name: test
         run: cargo test
 
+      - name: Cleanup orphaned test processes
+        if: always()
+        run: |
+          # Kill any remaining test processes
+          pkill -9 -f "fork.*debug/deps" || true
+          # Clean up test directories
+          rm -rf /tmp/fork_test* || true
+
   coverage:
     name: Coverage
     runs-on: ubuntu-latest
@@ -76,6 +84,14 @@ jobs:
           LLVM_PROFILE_FILE: coverage-%p-%m.profraw
           RUSTFLAGS: -Cinstrument-coverage -Ccodegen-units=1 -Clink-dead-code -Coverflow-checks=off
           RUSTDOCFLAGS: -Cinstrument-coverage -Ccodegen-units=1 -Clink-dead-code -Coverflow-checks=off
+
+      - name: Cleanup orphaned test processes
+        if: always()
+        run: |
+          # Kill any remaining test processes
+          pkill -9 -f "fork.*debug/deps" || true
+          # Clean up test directories
+          rm -rf /tmp/fork_test* || true
 
       - name: Install grcov
         run: if [[ ! -e ~/.cargo/bin/grcov ]]; then cargo install grcov; fi
