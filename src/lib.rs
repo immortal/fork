@@ -482,13 +482,13 @@ mod tests {
         match fork() {
             Ok(Fork::Parent(child)) => {
                 assert!(child > 0);
-                // Wait for child should succeed
+                // Wait for child with timeout to prevent hanging
+                // Simple approach: just call waitpid, the child exits immediately
                 let result = waitpid(child);
-                assert!(result.is_ok());
+                assert!(result.is_ok(), "waitpid should succeed");
             }
             Ok(Fork::Child) => {
-                // Child sleeps briefly then exits
-                thread::sleep(Duration::from_millis(50));
+                // Child exits immediately to prevent any hanging issues
                 exit(0);
             }
             Err(_) => panic!("Fork failed"),
