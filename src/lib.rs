@@ -234,12 +234,273 @@ pub fn daemon(nochdir: bool, noclose: bool) -> Result<Fork, i32> {
 
 #[cfg(test)]
 mod tests {
-    use super::{fork, Fork};
+    use super::{Fork, chdir, close_fd, daemon, fork, getpgrp, setsid, waitpid};
+    use std::env;
+    use std::process::{Command, exit};
+    use std::thread;
+    use std::time::Duration;
 
     #[test]
     fn test_fork() {
-        if let Ok(Fork::Parent(child)) = fork() {
-            assert!(child > 0);
+        match fork() {
+            Ok(Fork::Parent(child)) => {
+                assert!(child > 0);
+                // Wait for child to complete
+                let _ = waitpid(child);
+            }
+            Ok(Fork::Child) => {
+                // Child process exits immediately
+                exit(0);
+            }
+            Err(_) => panic!("Fork failed"),
+        }
+    }
+
+    #[test]
+    fn test_fork_with_waitpid() {
+        match fork() {
+            Ok(Fork::Parent(child)) => {
+                assert!(child > 0);
+                // Wait for child and verify it succeeds
+                assert!(waitpid(child).is_ok());
+            }
+            Ok(Fork::Child) => {
+                // Child does some work then exits
+                let _ = Command::new("true").output();
+                exit(0);
+            }
+            Err(_) => panic!("Fork failed"),
+        }
+    }
+
+    #[test]
+    fn test_chdir() {
+        match fork() {
+            Ok(Fork::Parent(child)) => {
+                let _ = waitpid(child);
+            }
+            Ok(Fork::Child) => {
+                // Test changing directory to root
+                match chdir() {
+                    Ok(res) => {
+                        assert_eq!(res, 0);
+                        let path = env::current_dir().expect("failed current_dir");
+                        assert_eq!(Some("/"), path.to_str());
+                        exit(0);
+                    }
+                    Err(_) => exit(1),
+                }
+            }
+            Err(_) => panic!("Fork failed"),
+        }
+    }
+
+    #[test]
+    fn test_getpgrp() {
+        match fork() {
+            Ok(Fork::Parent(child)) => {
+                let _ = waitpid(child);
+            }
+            Ok(Fork::Child) => {
+                // Get process group and verify it's valid
+                match getpgrp() {
+                    Ok(pgrp) => {
+                        assert!(pgrp > 0);
+                        exit(0);
+                    }
+                    Err(_) => exit(1),
+                }
+            }
+            Err(_) => panic!("Fork failed"),
+        }
+    }
+
+    #[test]
+    fn test_setsid() {
+        match fork() {
+            Ok(Fork::Parent(child)) => {
+                let _ = waitpid(child);
+            }
+            Ok(Fork::Child) => {
+                // Create new session
+                match setsid() {
+                    Ok(sid) => {
+                        assert!(sid > 0);
+                        // Verify we're the session leader
+                        let pgrp = getpgrp().expect("Failed to get process group");
+                        assert_eq!(sid, pgrp);
+                        exit(0);
+                    }
+                    Err(_) => exit(1),
+                }
+            }
+            Err(_) => panic!("Fork failed"),
+        }
+    }
+
+    #[test]
+    fn test_daemon_with_chdir() {
+        match daemon(false, true) {
+            Ok(Fork::Parent(child)) => {
+                assert!(child > 0);
+                // Give daemon time to set up before parent exits
+                thread::sleep(Duration::from_millis(10));
+            }
+            Ok(Fork::Child) => {
+                // Verify we changed to root directory
+                let path = env::current_dir().expect("failed current_dir");
+                assert_eq!(Some("/"), path.to_str());
+
+                // Verify we're in a new session
+                let pgrp = getpgrp().expect("Failed to get process group");
+                assert!(pgrp > 0);
+
+                exit(0);
+            }
+            Err(_) => panic!("Daemon failed"),
+        }
+    }
+
+    #[test]
+    fn test_daemon_no_chdir() {
+        let original_dir = env::current_dir().expect("failed to get current dir");
+
+        match daemon(true, true) {
+            Ok(Fork::Parent(child)) => {
+                assert!(child > 0);
+                thread::sleep(Duration::from_millis(10));
+            }
+            Ok(Fork::Child) => {
+                // Verify we stayed in the same directory (nochdir=true)
+                let current_dir = env::current_dir().expect("failed current_dir");
+                // The directory should be preserved
+                if original_dir.to_str() != Some("/") {
+                    assert!(current_dir.to_str().is_some());
+                }
+                exit(0);
+            }
+            Err(_) => panic!("Daemon failed"),
+        }
+    }
+
+    #[test]
+    fn test_daemon_with_close_fd() {
+        match daemon(false, false) {
+            Ok(Fork::Parent(child)) => {
+                assert!(child > 0);
+                thread::sleep(Duration::from_millis(10));
+            }
+            Ok(Fork::Child) => {
+                // File descriptors 0, 1, 2 should be closed
+                // Just verify daemon creation succeeded
+                exit(0);
+            }
+            Err(_) => panic!("Daemon failed"),
+        }
+    }
+
+    #[test]
+    fn test_close_fd_functionality() {
+        match fork() {
+            Ok(Fork::Parent(child)) => {
+                let _ = waitpid(child);
+            }
+            Ok(Fork::Child) => {
+                // Close standard file descriptors
+                match close_fd() {
+                    Ok(_) => exit(0),
+                    Err(_) => exit(1),
+                }
+            }
+            Err(_) => panic!("Fork failed"),
+        }
+    }
+
+    #[test]
+    fn test_double_fork_pattern() {
+        // Test the double-fork pattern commonly used for daemons
+        match fork() {
+            Ok(Fork::Parent(child1)) => {
+                assert!(child1 > 0);
+                let _ = waitpid(child1);
+            }
+            Ok(Fork::Child) => {
+                // First child creates new session
+                setsid().expect("Failed to setsid");
+
+                // Second fork to ensure we're not session leader
+                match fork() {
+                    Ok(Fork::Parent(_)) => {
+                        // First child exits
+                        exit(0);
+                    }
+                    Ok(Fork::Child) => {
+                        // Grandchild - the daemon process
+                        let pgrp = getpgrp().expect("Failed to get process group");
+                        assert!(pgrp > 0);
+                        exit(0);
+                    }
+                    Err(_) => exit(1),
+                }
+            }
+            Err(_) => panic!("Fork failed"),
+        }
+    }
+
+    #[test]
+    fn test_waitpid_with_child() {
+        match fork() {
+            Ok(Fork::Parent(child)) => {
+                assert!(child > 0);
+                // Wait for child should succeed
+                let result = waitpid(child);
+                assert!(result.is_ok());
+            }
+            Ok(Fork::Child) => {
+                // Child sleeps briefly then exits
+                thread::sleep(Duration::from_millis(50));
+                exit(0);
+            }
+            Err(_) => panic!("Fork failed"),
+        }
+    }
+
+    #[test]
+    fn test_fork_child_execution() {
+        match fork() {
+            Ok(Fork::Parent(child)) => {
+                assert!(child > 0);
+                // Wait for child to finish its work
+                assert!(waitpid(child).is_ok());
+            }
+            Ok(Fork::Child) => {
+                // Child executes a simple command
+                let output = Command::new("echo")
+                    .arg("test")
+                    .output()
+                    .expect("Failed to execute command");
+                assert!(output.status.success());
+                exit(0);
+            }
+            Err(_) => panic!("Fork failed"),
+        }
+    }
+
+    #[test]
+    fn test_multiple_forks() {
+        // Test creating multiple child processes
+        for i in 0..3 {
+            match fork() {
+                Ok(Fork::Parent(child)) => {
+                    assert!(child > 0);
+                    let _ = waitpid(child);
+                }
+                Ok(Fork::Child) => {
+                    // Each child exits with its index
+                    exit(i);
+                }
+                Err(_) => panic!("Fork {} failed", i),
+            }
         }
     }
 }

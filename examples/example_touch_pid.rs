@@ -1,5 +1,5 @@
 /// run with `cargo run --example example_touch_pid`
-use fork::{daemon, Fork};
+use fork::{Fork, daemon};
 use std::fs::OpenOptions;
 use std::process::Command;
 

@@ -1,5 +1,5 @@
 /// run with `cargo run --example example_daemon`
-use fork::{daemon, Fork};
+use fork::{Fork, daemon};
 use std::process::Command;
 
 fn main() {

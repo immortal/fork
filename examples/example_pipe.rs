@@ -1,8 +1,8 @@
 /// run with `cargo run --example example_pipe`
-use fork::{fork, setsid, Fork};
+use fork::{Fork, fork, setsid};
 use os_pipe::pipe;
 use std::io::prelude::*;
-use std::process::{exit, Command, Stdio};
+use std::process::{Command, Stdio, exit};
 
 fn main() {
     // Create a pipe for communication
