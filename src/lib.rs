@@ -237,8 +237,6 @@ mod tests {
     use super::*;
     use std::env;
     use std::process::{Command, exit};
-    use std::thread;
-    use std::time::Duration;
 
     #[test]
     fn test_fork() {
