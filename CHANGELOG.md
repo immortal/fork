@@ -1,3 +1,9 @@
+## 0.3.1
+* Added comprehensive test coverage for `getpgrp()` function
+  - Unit tests in `src/lib.rs` (`test_getpgrp`, `test_getpgrp_in_parent`)
+  - Integration test `test_getpgrp_returns_process_group` in `tests/integration_tests.rs`
+* Added `coverage` recipe to `.justfile` for generating coverage reports with grcov
+
 ## 0.3.0
 
 ### Changed

@@ -531,4 +531,11 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn test_getpgrp_in_parent() {
+        // Test getpgrp in parent process
+        let parent_pgrp = getpgrp().expect("getpgrp should succeed");
+        assert!(parent_pgrp > 0);
+    }
 }
