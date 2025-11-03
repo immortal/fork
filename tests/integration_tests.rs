@@ -14,7 +14,7 @@
 mod common;
 
 use common::{get_test_dir, setup_test_dir, wait_for_file};
-use fork::{Fork, chdir, fork, getpgrp, setsid};
+use fork::{Fork, chdir, fork, getpgrp, setsid, waitpid};
 use std::{env, fs, process::exit, thread, time::Duration};
 
 #[test]
@@ -220,6 +220,52 @@ fn test_getpgrp_returns_process_group() {
         Fork::Child => {
             let child_pgid = getpgrp().expect("getpgrp failed");
             assert!(child_pgid > 0, "Child PGID should be positive");
+
+            exit(0);
+        }
+    }
+}
+
+#[test]
+fn test_chdir_error_handling() {
+    // Test that chdir returns proper io::Error
+    match fork().expect("Fork failed") {
+        Fork::Parent(child) => {
+            waitpid(child).expect("waitpid failed");
+        }
+        Fork::Child => {
+            // chdir() to root should succeed
+            let result = chdir();
+            assert!(result.is_ok(), "chdir to root should succeed");
+
+            // Verify we're actually in root
+            let cwd = env::current_dir().expect("Failed to get current dir");
+            assert_eq!(cwd.to_str().unwrap(), "/", "Should be in root directory");
+
+            exit(0);
+        }
+    }
+}
+
+#[test]
+fn test_chdir_returns_io_error() {
+    // Test that chdir returns a proper io::Error type
+    match fork().expect("Fork failed") {
+        Fork::Parent(child) => {
+            waitpid(child).expect("waitpid failed");
+        }
+        Fork::Child => {
+            // Call chdir and verify return type
+            let result: std::io::Result<()> = chdir();
+
+            // Should succeed
+            assert!(result.is_ok());
+
+            // If it were to fail, we could access error details
+            if let Err(e) = result {
+                let _errno = e.raw_os_error();
+                let _msg = format!("{}", e);
+            }
 
             exit(0);
         }

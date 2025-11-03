@@ -30,7 +30,7 @@ Add `fork` to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-fork = "0.3"
+fork = "0.4"
 ```
 
 Or use cargo-add:
@@ -70,7 +70,30 @@ match fork() {
     Ok(Fork::Child) => {
         println!("Child process");
     }
-    Err(_) => println!("Fork failed"),
+    Err(e) => eprintln!("Fork failed: {}", e),
+}
+```
+
+### Error Handling with Rich Diagnostics
+
+```rust
+use fork::{fork, Fork};
+
+match fork() {
+    Ok(Fork::Parent(child)) => {
+        println!("Spawned child with PID: {}", child);
+    }
+    Ok(Fork::Child) => {
+        println!("I'm the child!");
+        std::process::exit(0);
+    }
+    Err(err) => {
+        eprintln!("Fork failed: {}", err);
+        // Access the underlying errno if needed
+        if let Some(code) = err.raw_os_error() {
+            eprintln!("OS error code: {}", code);
+        }
+    }
 }
 ```
 

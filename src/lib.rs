@@ -14,9 +14,11 @@
 //!```
 
 use std::ffi::CString;
+use std::io;
 use std::process::exit;
 
 /// Fork result
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Fork {
     Parent(libc::pid_t),
     Child,
@@ -24,9 +26,8 @@ pub enum Fork {
 
 /// Change dir to `/` [see chdir(2)](https://www.freebsd.org/cgi/man.cgi?query=chdir&sektion=2)
 ///
-/// Upon successful completion, 0 shall be returned. Otherwise, -1 shall be
-/// returned, the current working directory shall remain unchanged, and errno
-/// shall be set to indicate the error.
+/// Upon successful completion, the current working directory is changed to `/`.
+/// Otherwise, an error is returned with the system error code.
 ///
 /// Example:
 ///
@@ -39,46 +40,136 @@ pub enum Fork {
 ///       let path = env::current_dir().expect("failed current_dir");
 ///       assert_eq!(Some("/"), path.to_str());
 ///    }
-///    _ => panic!(),
+///    Err(e) => eprintln!("Failed to change directory: {}", e),
 ///}
 ///```
 ///
 /// # Errors
-/// returns `-1` if error
+/// Returns an [`io::Error`] if the system call fails. Common errors include:
+/// - Permission denied
+/// - Path does not exist
+///
 /// # Panics
 /// Panics if `CString::new` fails
-pub fn chdir() -> Result<libc::c_int, i32> {
+pub fn chdir() -> io::Result<()> {
     let dir = CString::new("/").expect("CString::new failed");
     let res = unsafe { libc::chdir(dir.as_ptr()) };
     match res {
-        -1 => Err(-1),
-        res => Ok(res),
+        -1 => Err(io::Error::last_os_error()),
+        _ => Ok(()),
     }
 }
 
-/// Close file descriptors stdin,stdout,stderr
+/// Close file descriptors stdin, stdout, stderr
+///
+/// **Warning:** This function closes the file descriptors, making them
+/// available for reuse. If your daemon opens files after calling this,
+/// those files may get fd 0, 1, or 2, causing `println!`, `eprintln!`,
+/// or panic output to corrupt them.
+///
+/// **Use [`redirect_stdio()`] instead**, which is safer and follows
+/// industry best practices by redirecting stdio to `/dev/null` instead
+/// of closing. This keeps fd 0, 1, 2 occupied, ensuring subsequent files
+/// get fd >= 3, preventing silent corruption.
 ///
 /// # Errors
-/// returns `-1` if error
-pub fn close_fd() -> Result<(), i32> {
-    match unsafe { libc::close(0) } {
-        -1 => Err(-1),
-        _ => match unsafe { libc::close(1) } {
-            -1 => Err(-1),
-            _ => match unsafe { libc::close(2) } {
-                -1 => Err(-1),
-                _ => Ok(()),
-            },
-        },
+/// Returns an [`io::Error`] if any of the file descriptors fail to close.
+///
+/// # Example
+///
+/// ```no_run
+/// use fork::close_fd;
+///
+/// // Warning: Files opened after this may get fd 0,1,2!
+/// close_fd()?;
+/// # Ok::<(), std::io::Error>(())
+/// ```
+pub fn close_fd() -> io::Result<()> {
+    for fd in 0..=2 {
+        if unsafe { libc::close(fd) } == -1 {
+            return Err(io::Error::last_os_error());
+        }
     }
+    Ok(())
+}
+
+/// Redirect stdin, stdout, stderr to /dev/null
+///
+/// This is the recommended way to detach from the controlling terminal
+/// in daemon processes. Unlike [`close_fd()`], this keeps file descriptors
+/// 0, 1, 2 occupied (pointing to /dev/null), preventing them from being
+/// reused by subsequent `open()` calls.
+///
+/// This prevents bugs where `println!`, `eprintln!`, or panic output
+/// accidentally writes to data files that happened to get assigned fd 0, 1, or 2.
+///
+/// # Implementation
+///
+/// This function:
+/// 1. Opens `/dev/null` with O_RDWR
+/// 2. Uses `dup2()` to redirect fds 0, 1, 2 to `/dev/null`
+/// 3. Closes the extra file descriptor if it was > 2
+///
+/// This is the same approach used by libuv, systemd, and BSD `daemon(3)`.
+///
+/// # Errors
+///
+/// Returns an [`io::Error`] if:
+/// - `/dev/null` cannot be opened
+/// - `dup2()` fails to redirect any of the file descriptors
+///
+/// # Example
+///
+/// ```no_run
+/// use fork::redirect_stdio;
+/// use std::fs::File;
+///
+/// redirect_stdio()?;
+///
+/// // Now safe: files will get fd >= 3
+/// let log = File::create("app.log")?;
+///
+/// // This goes to /dev/null (safely discarded), not to app.log
+/// println!("debug message");
+/// # Ok::<(), std::io::Error>(())
+/// ```
+pub fn redirect_stdio() -> io::Result<()> {
+    use std::ffi::CString;
+
+    let dev_null = CString::new("/dev/null")
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "CString::new failed"))?;
+
+    let null_fd = unsafe { libc::open(dev_null.as_ptr(), libc::O_RDWR) };
+
+    if null_fd == -1 {
+        return Err(io::Error::last_os_error());
+    }
+
+    // Redirect stdin, stdout, stderr to /dev/null
+    for fd in 0..=2 {
+        if unsafe { libc::dup2(null_fd, fd) } == -1 {
+            let err = io::Error::last_os_error();
+            // Clean up the opened fd before returning error
+            if null_fd > 2 {
+                unsafe { libc::close(null_fd) };
+            }
+            return Err(err);
+        }
+    }
+
+    // Close the extra fd if it's > 2
+    // (if null_fd was 0, 1, or 2, it's now dup'd to all three, so don't close)
+    if null_fd > 2 {
+        unsafe { libc::close(null_fd) };
+    }
+
+    Ok(())
 }
 
 /// Create a new child process [see fork(2)](https://www.freebsd.org/cgi/man.cgi?fork)
 ///
-/// Upon successful completion, `fork()` returns a value of 0 to the child process
-/// and returns the process ID of the child process to the parent process.
-/// Otherwise, a value of -1 is returned to the parent process, no child process
-/// is created.
+/// Upon successful completion, `fork()` returns [`Fork::Child`] in the child process
+/// and `Fork::Parent(pid)` with the child's process ID in the parent process.
 ///
 /// Example:
 ///
@@ -90,7 +181,7 @@ pub fn close_fd() -> Result<(), i32> {
 ///        println!("Continuing execution in parent process, new child has pid: {}", child);
 ///    }
 ///    Ok(Fork::Child) => println!("I'm a new child process"),
-///    Err(_) => println!("Fork failed"),
+///    Err(e) => eprintln!("Fork failed: {}", e),
 ///}
 ///```
 /// This will print something like the following (order indeterministic).
@@ -109,11 +200,13 @@ pub fn close_fd() -> Result<(), i32> {
 /// please check the [Safety](https://docs.rs/nix/0.15.0/nix/unistd/fn.fork.html#safety) section
 ///
 /// # Errors
-/// returns `-1` if error
-pub fn fork() -> Result<Fork, i32> {
+/// Returns an [`io::Error`] if the fork system call fails. Common errors include:
+/// - Resource temporarily unavailable (EAGAIN) - process limit reached
+/// - Out of memory (ENOMEM)
+pub fn fork() -> io::Result<Fork> {
     let res = unsafe { libc::fork() };
     match res {
-        -1 => Err(-1),
+        -1 => Err(io::Error::last_os_error()),
         0 => Ok(Fork::Child),
         res => Ok(Fork::Parent(res)),
     }
@@ -122,7 +215,9 @@ pub fn fork() -> Result<Fork, i32> {
 /// Wait for process to change status [see wait(2)](https://man.freebsd.org/cgi/man.cgi?waitpid)
 ///
 /// # Errors
-/// returns `-1` if error
+/// Returns an [`io::Error`] if the waitpid system call fails. Common errors include:
+/// - No child process exists with the given PID
+/// - Invalid options or PID
 ///
 /// Example:
 ///
@@ -137,8 +232,8 @@ pub fn fork() -> Result<Fork, i32> {
 ///         println!("Child pid: {pid}");
 ///
 ///         match waitpid(pid) {
-///             Ok(_) => println!("Child existed"),
-///             Err(_) => eprintln!("Failted to wait on child"),
+///             Ok(_) => println!("Child exited"),
+///             Err(e) => eprintln!("Failed to wait on child: {}", e),
 ///         }
 ///     }
 ///     Ok(Fork::Child) => {
@@ -147,15 +242,15 @@ pub fn fork() -> Result<Fork, i32> {
 ///             .output()
 ///             .expect("failed to execute process");
 ///     }
-///     Err(_) => eprintln!("Failed to fork"),
+///     Err(e) => eprintln!("Failed to fork: {}", e),
 ///  }
 ///}
 ///```
-pub fn waitpid(pid: i32) -> Result<(), i32> {
+pub fn waitpid(pid: i32) -> io::Result<()> {
     let mut status: i32 = 0;
     let res = unsafe { libc::waitpid(pid, &mut status, 0) };
     match res {
-        -1 => Err(-1),
+        -1 => Err(io::Error::last_os_error()),
         _ => Ok(()),
     }
 }
@@ -164,26 +259,28 @@ pub fn waitpid(pid: i32) -> Result<(), i32> {
 ///
 /// Upon successful completion, the `setsid()` system call returns the value of the
 /// process group ID of the new process group, which is the same as the process ID
-/// of the calling process. If an error occurs, `setsid()` returns -1
+/// of the calling process.
 ///
 /// # Errors
-/// returns `-1` if error
-pub fn setsid() -> Result<libc::pid_t, i32> {
+/// Returns an [`io::Error`] if the setsid system call fails. Common errors include:
+/// - The calling process is already a process group leader (EPERM)
+pub fn setsid() -> io::Result<libc::pid_t> {
     let res = unsafe { libc::setsid() };
     match res {
-        -1 => Err(-1),
+        -1 => Err(io::Error::last_os_error()),
         res => Ok(res),
     }
 }
 
-/// The process group of the current process [see getgrp(2)](https://www.freebsd.org/cgi/man.cgi?query=getpgrp)
+/// The process group of the current process [see getpgrp(2)](https://www.freebsd.org/cgi/man.cgi?query=getpgrp)
 ///
 /// # Errors
-/// returns `-1` if error
-pub fn getpgrp() -> Result<libc::pid_t, i32> {
+/// This function should not fail under normal circumstances, but returns
+/// an [`io::Error`] if the system call fails.
+pub fn getpgrp() -> io::Result<libc::pid_t> {
     let res = unsafe { libc::getpgrp() };
     match res {
-        -1 => Err(-1),
+        -1 => Err(io::Error::last_os_error()),
         res => Ok(res),
     }
 }
@@ -192,10 +289,21 @@ pub fn getpgrp() -> Result<libc::pid_t, i32> {
 /// controlling terminal and run in the background as system daemons.
 ///
 /// * `nochdir = false`, changes the current working directory to the root (`/`).
-/// * `noclose = false`, will close standard input, standard output, and standard error
+/// * `noclose = false`, redirects stdin, stdout, and stderr to `/dev/null`
+///
+/// # Behavior Change in v0.4.0
+///
+/// Previously, `noclose = false` would close stdio file descriptors.
+/// Now it redirects them to `/dev/null` instead, which is safer and prevents
+/// file descriptor reuse bugs. This matches industry standard implementations
+/// (libuv, systemd, BSD daemon(3)).
 ///
 /// # Errors
-/// If an error occurs, returns -1
+/// Returns an [`io::Error`] if any of the underlying system calls fail:
+/// - fork fails (e.g., resource limits)
+/// - setsid fails (e.g., already a session leader)
+/// - chdir fails (when `nochdir` is false)
+/// - redirect_stdio fails (when `noclose` is false)
 ///
 /// Example:
 ///
@@ -216,7 +324,7 @@ pub fn getpgrp() -> Result<libc::pid_t, i32> {
 ///        .expect("failed to execute process");
 ///}
 ///```
-pub fn daemon(nochdir: bool, noclose: bool) -> Result<Fork, i32> {
+pub fn daemon(nochdir: bool, noclose: bool) -> io::Result<Fork> {
     match fork() {
         Ok(Fork::Parent(_)) => exit(0),
         Ok(Fork::Child) => setsid().and_then(|_| {
@@ -224,11 +332,11 @@ pub fn daemon(nochdir: bool, noclose: bool) -> Result<Fork, i32> {
                 chdir()?;
             }
             if !noclose {
-                close_fd()?;
+                redirect_stdio()?;
             }
             fork()
         }),
-        Err(n) => Err(n),
+        Err(e) => Err(e),
     }
 }
 
@@ -280,8 +388,7 @@ mod tests {
             Ok(Fork::Child) => {
                 // Test changing directory to root
                 match chdir() {
-                    Ok(res) => {
-                        assert_eq!(res, 0);
+                    Ok(_) => {
                         let path = env::current_dir().expect("failed current_dir");
                         assert_eq!(Some("/"), path.to_str());
                         exit(0);
