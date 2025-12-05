@@ -13,16 +13,26 @@
 //! All tests use temporary files for parent-child communication since
 //! forked processes have separate memory spaces.
 
+#![allow(clippy::expect_used)]
+#![allow(clippy::unwrap_used)]
+#![allow(clippy::panic)]
+#![allow(clippy::match_wild_err_arm)]
+#![allow(clippy::similar_names)]
+#![allow(clippy::uninlined_format_args)]
+#![allow(clippy::indexing_slicing)]
+
 mod common;
 
-use common::{get_test_dir, setup_test_dir};
-use fork::{Fork, fork, waitpid};
 use std::{
     env, fs,
     process::{Command, exit},
     thread,
     time::Duration,
 };
+
+use fork::{Fork, fork, waitpid};
+
+use common::{get_test_dir, setup_test_dir};
 
 #[test]
 // Tests basic fork() functionality with waitpid()

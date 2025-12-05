@@ -2,26 +2,96 @@
 //!
 //! Example:
 //! ```
-//!use fork::{daemon, Fork};
-//!use std::process::Command;
+//! use fork::{daemon, Fork};
+//! use std::process::Command;
 //!
-//!if let Ok(Fork::Child) = daemon(false, false) {
-//!    Command::new("sleep")
-//!        .arg("3")
-//!        .output()
-//!        .expect("failed to execute process");
-//!}
-//!```
+//! if let Ok(Fork::Child) = daemon(false, false) {
+//!     Command::new("sleep")
+//!         .arg("3")
+//!         .output()
+//!         .expect("failed to execute process");
+//! }
+//! ```
 
-use std::ffi::CString;
-use std::io;
-use std::process::exit;
+use std::{ffi::CString, io, process::exit};
 
 /// Fork result
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Fork {
     Parent(libc::pid_t),
     Child,
+}
+
+impl Fork {
+    /// Returns `true` if this is the parent process
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use fork::{fork, Fork};
+    ///
+    /// match fork() {
+    ///     Ok(result) => {
+    ///         if result.is_parent() {
+    ///             println!("I'm the parent");
+    ///         }
+    ///     }
+    ///     Err(_) => {}
+    /// }
+    /// ```
+    #[must_use]
+    #[inline]
+    pub const fn is_parent(&self) -> bool {
+        matches!(self, Self::Parent(_))
+    }
+
+    /// Returns `true` if this is the child process
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use fork::{fork, Fork};
+    ///
+    /// match fork() {
+    ///     Ok(result) => {
+    ///         if result.is_child() {
+    ///             println!("I'm the child");
+    ///             std::process::exit(0);
+    ///         }
+    ///     }
+    ///     Err(_) => {}
+    /// }
+    /// ```
+    #[must_use]
+    #[inline]
+    pub const fn is_child(&self) -> bool {
+        matches!(self, Self::Child)
+    }
+
+    /// Returns the child PID if this is the parent, otherwise `None`
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use fork::{fork, Fork};
+    ///
+    /// match fork() {
+    ///     Ok(result) => {
+    ///         if let Some(child_pid) = result.child_pid() {
+    ///             println!("Child PID: {}", child_pid);
+    ///         }
+    ///     }
+    ///     Err(_) => {}
+    /// }
+    /// ```
+    #[must_use]
+    #[inline]
+    pub const fn child_pid(&self) -> Option<libc::pid_t> {
+        match self {
+            Self::Parent(pid) => Some(*pid),
+            Self::Child => None,
+        }
+    }
 }
 
 /// Change dir to `/` [see chdir(2)](https://www.freebsd.org/cgi/man.cgi?query=chdir&sektion=2)
@@ -49,10 +119,15 @@ pub enum Fork {
 /// - Permission denied
 /// - Path does not exist
 ///
-/// # Panics
-/// Panics if `CString::new` fails
+#[inline]
 pub fn chdir() -> io::Result<()> {
-    let dir = CString::new("/").expect("CString::new failed");
+    // SAFETY: "/" is a valid C string with no null bytes
+    let dir = CString::new("/").map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Failed to create C string for root directory",
+        )
+    })?;
     let res = unsafe { libc::chdir(dir.as_ptr()) };
     match res {
         -1 => Err(io::Error::last_os_error()),
@@ -106,7 +181,7 @@ pub fn close_fd() -> io::Result<()> {
 /// # Implementation
 ///
 /// This function:
-/// 1. Opens `/dev/null` with O_RDWR
+/// 1. Opens `/dev/null` with `O_RDWR`
 /// 2. Uses `dup2()` to redirect fds 0, 1, 2 to `/dev/null`
 /// 3. Closes the extra file descriptor if it was > 2
 ///
@@ -194,6 +269,24 @@ pub fn redirect_stdio() -> io::Result<()> {
 /// The thing to note is that you end up with two processes continuing execution
 /// immediately after the fork call but with different match arms.
 ///
+/// # Safety Considerations
+///
+/// After calling `fork()`, the child process is an exact copy of the parent process.
+/// However, there are important safety considerations:
+///
+/// - **File Descriptors**: Inherited from parent but share the same file offset and status flags.
+///   Changes in one process affect the other.
+/// - **Mutexes and Locks**: May be in an inconsistent state in the child. Only the thread that
+///   called `fork()` exists in the child; other threads disappear mid-execution, potentially
+///   leaving mutexes locked.
+/// - **Async-Signal-Safety**: Between `fork()` and `exec()`, only async-signal-safe functions
+///   should be called. This includes most system calls but excludes most library functions,
+///   memory allocation, and I/O operations.
+/// - **Signal Handlers**: Inherited from parent but should be used carefully in multi-threaded programs.
+/// - **Memory**: Child gets a copy-on-write copy of parent's memory. Large memory usage can impact performance.
+///
+/// For detailed information, see the [fork(2) man page](https://man7.org/linux/man-pages/man2/fork.2.html).
+///
 /// # [`nix::unistd::fork`](https://docs.rs/nix/0.15.0/nix/unistd/fn.fork.html)
 ///
 /// The example has been taken from the [`nix::unistd::fork`](https://docs.rs/nix/0.15.0/nix/unistd/fn.fork.html),
@@ -203,6 +296,7 @@ pub fn redirect_stdio() -> io::Result<()> {
 /// Returns an [`io::Error`] if the fork system call fails. Common errors include:
 /// - Resource temporarily unavailable (EAGAIN) - process limit reached
 /// - Out of memory (ENOMEM)
+#[must_use = "fork result must be checked to determine parent/child"]
 pub fn fork() -> io::Result<Fork> {
     let res = unsafe { libc::fork() };
     match res {
@@ -248,7 +342,7 @@ pub fn fork() -> io::Result<Fork> {
 ///```
 pub fn waitpid(pid: i32) -> io::Result<()> {
     let mut status: i32 = 0;
-    let res = unsafe { libc::waitpid(pid, &mut status, 0) };
+    let res = unsafe { libc::waitpid(pid, &raw mut status, 0) };
     match res {
         -1 => Err(io::Error::last_os_error()),
         _ => Ok(()),
@@ -264,6 +358,8 @@ pub fn waitpid(pid: i32) -> io::Result<()> {
 /// # Errors
 /// Returns an [`io::Error`] if the setsid system call fails. Common errors include:
 /// - The calling process is already a process group leader (EPERM)
+#[inline]
+#[must_use = "session ID should be used or checked for errors"]
 pub fn setsid() -> io::Result<libc::pid_t> {
     let res = unsafe { libc::setsid() };
     match res {
@@ -277,6 +373,8 @@ pub fn setsid() -> io::Result<libc::pid_t> {
 /// # Errors
 /// This function should not fail under normal circumstances, but returns
 /// an [`io::Error`] if the system call fails.
+#[inline]
+#[must_use = "process group ID should be used"]
 pub fn getpgrp() -> io::Result<libc::pid_t> {
     let res = unsafe { libc::getpgrp() };
     match res {
@@ -303,7 +401,7 @@ pub fn getpgrp() -> io::Result<libc::pid_t> {
 /// - fork fails (e.g., resource limits)
 /// - setsid fails (e.g., already a session leader)
 /// - chdir fails (when `nochdir` is false)
-/// - redirect_stdio fails (when `noclose` is false)
+/// - `redirect_stdio` fails (when `noclose` is false)
 ///
 /// Example:
 ///
@@ -324,10 +422,12 @@ pub fn getpgrp() -> io::Result<libc::pid_t> {
 ///        .expect("failed to execute process");
 ///}
 ///```
+#[must_use = "daemon result must be checked to determine if this is the daemon process"]
 pub fn daemon(nochdir: bool, noclose: bool) -> io::Result<Fork> {
-    match fork() {
-        Ok(Fork::Parent(_)) => exit(0),
-        Ok(Fork::Child) => setsid().and_then(|_| {
+    match fork()? {
+        Fork::Parent(_) => exit(0),
+        Fork::Child => {
+            setsid()?;
             if !nochdir {
                 chdir()?;
             }
@@ -335,12 +435,16 @@ pub fn daemon(nochdir: bool, noclose: bool) -> io::Result<Fork> {
                 redirect_stdio()?;
             }
             fork()
-        }),
-        Err(e) => Err(e),
+        }
     }
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
+#[allow(clippy::panic)]
+#[allow(clippy::match_wild_err_arm)]
+#[allow(clippy::ignored_unit_patterns)]
+#[allow(clippy::uninlined_format_args)]
 mod tests {
     use super::*;
     use std::env;

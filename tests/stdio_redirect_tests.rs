@@ -1,9 +1,18 @@
+#![allow(clippy::expect_used)]
+#![allow(clippy::unwrap_used)]
+#![allow(clippy::panic)]
+#![allow(clippy::match_wild_err_arm)]
+#![allow(clippy::similar_names)]
+#![allow(clippy::uninlined_format_args)]
+#![allow(clippy::cast_ptr_alignment)]
+#![allow(clippy::ptr_as_ptr)]
+#![allow(clippy::doc_markdown)]
+
 /// Tests for stdio redirection to /dev/null
 /// These tests verify that file descriptors 0,1,2 are not reused after closing stdio
+use std::{fs::File, io::Write, os::unix::io::AsRawFd, process::exit};
+
 use fork::{Fork, close_fd, fork, waitpid};
-use std::fs::File;
-use std::os::unix::io::AsRawFd;
-use std::process::exit;
 
 /// Test that demonstrates the fd reuse bug with close_fd()
 ///
@@ -60,8 +69,6 @@ fn test_close_fd_allows_fd_reuse() {
 /// This test demonstrates that println! would write to wrong file
 #[test]
 fn test_fd_reuse_corruption_scenario() {
-    use std::io::Write;
-
     match fork() {
         Ok(Fork::Parent(child)) => {
             waitpid(child).unwrap();
@@ -162,8 +169,6 @@ fn test_redirect_stdio_prevents_fd_reuse() {
 
 #[test]
 fn test_redirect_stdio_println_safety() {
-    use std::io::Write;
-
     match fork() {
         Ok(Fork::Parent(child)) => {
             waitpid(child).unwrap();
@@ -224,8 +229,6 @@ fn test_daemon_uses_redirect_stdio() {
             let _ = std::fs::remove_file("/tmp/fork_test_daemon_redirect.txt");
         }
         Ok(Fork::Child) => {
-            use std::io::Write;
-
             // Simulate what daemon() does
             fork::setsid().unwrap();
             fork::redirect_stdio().unwrap(); // This is what daemon() now uses

@@ -1,3 +1,34 @@
+## 0.4.1
+
+### Added
+* **Fork helper methods** - Added convenience methods to `Fork` enum
+  - `is_parent()` - Check if this is the parent process
+  - `is_child()` - Check if this is the child process
+  - `child_pid()` - Get child PID if parent, otherwise None
+* **Hash trait** - `Fork` now derives `Hash`, enabling use in `HashMap` and `HashSet`
+  - Useful for process supervisors and tracking multiple children
+  - Examples: `supervisor.rs` and `supervisor_advanced.rs`
+* **must_use attributes** - Added `#[must_use]` to critical functions to prevent accidental misuse
+  - `fork()` - Must check if parent or child
+  - `daemon()` - Must check daemon result
+  - `setsid()` - Must use session ID
+  - `getpgrp()` - Must use process group ID
+
+### Improved
+* **Performance** - Added `#[inline]` hints to thin wrapper functions (`chdir`, `setsid`, `getpgrp`)
+* **Documentation** - Enhanced `fork()` with comprehensive safety considerations
+  - File descriptor inheritance and shared state
+  - Mutex/lock consistency issues in multi-threaded programs
+  - Async-signal-safety requirements
+  - Signal handler inheritance
+  - Memory copy-on-write behavior
+* **Code quality** - Simplified `daemon()` implementation using `?` operator consistently
+* **Test coverage** - Increased to 50 tests (14 unit + 26 integration + 10 doc)
+
+### Examples
+* Added `supervisor.rs` - Basic process supervisor example
+* Added `supervisor_advanced.rs` - Production-ready supervisor with restart policies
+
 ## 0.4.0
 
 ### Breaking Changes

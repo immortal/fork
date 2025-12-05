@@ -36,7 +36,7 @@ pub fn setup_test_dir(path: PathBuf) -> PathBuf {
 /// Wait for a file to exist with timeout
 pub fn wait_for_file(path: &Path, timeout_ms: u64) -> bool {
     let start = Instant::now();
-    while start.elapsed().as_millis() < timeout_ms as u128 {
+    while start.elapsed().as_millis() < u128::from(timeout_ms) {
         if path.exists() {
             return true;
         }

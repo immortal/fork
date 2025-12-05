@@ -11,11 +11,21 @@
 //! These tests combine multiple fork operations to test real-world
 //! daemon creation patterns and process management scenarios.
 
+#![allow(clippy::expect_used)]
+#![allow(clippy::unwrap_used)]
+#![allow(clippy::panic)]
+#![allow(clippy::match_wild_err_arm)]
+#![allow(clippy::similar_names)]
+#![allow(clippy::uninlined_format_args)]
+#![allow(clippy::indexing_slicing)]
+
 mod common;
 
-use common::{get_test_dir, setup_test_dir, wait_for_file};
-use fork::{Fork, chdir, fork, getpgrp, setsid, waitpid};
 use std::{env, fs, process::exit, thread, time::Duration};
+
+use fork::{Fork, chdir, fork, getpgrp, setsid, waitpid};
+
+use common::{get_test_dir, setup_test_dir, wait_for_file};
 
 #[test]
 fn test_double_fork_daemon_pattern() {

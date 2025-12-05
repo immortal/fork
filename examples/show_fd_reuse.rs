@@ -1,10 +1,17 @@
+#![allow(clippy::expect_used)]
+#![allow(clippy::unwrap_used)]
+#![allow(clippy::panic)]
+#![allow(clippy::uninlined_format_args)]
+#![allow(clippy::match_wild_err_arm)]
+#![allow(clippy::cast_ptr_alignment)]
+#![allow(clippy::doc_markdown)]
+
 /// Simple demonstration showing file descriptor reuse
 ///
 /// Run with: cargo run --example show_fd_reuse
+use std::{fs::File, os::unix::io::AsRawFd, process::exit};
+
 use fork::{Fork, close_fd, fork, redirect_stdio, waitpid};
-use std::fs::File;
-use std::os::unix::io::AsRawFd;
-use std::process::exit;
 
 fn main() {
     println!("\n═══════════════════════════════════════════════════════════════");

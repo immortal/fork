@@ -1,6 +1,6 @@
 [package]
 name = "fork"
-version = "0.4.0"
+version = "0.4.1"
 authors = ["Nicolas Embriz <nbari@tequila.io>"]
 description = "Library for creating a new process detached from the controlling terminal (daemon)"
 documentation = "https://docs.rs/fork/latest/fork/"
@@ -11,6 +11,35 @@ keywords = ["fork", "setsid", "daemon", "process", "daemonize"]
 categories = ["os::unix-apis", "api-bindings"]
 license = "BSD-3-Clause"
 edition = "2024"
+
+[lints.rust]
+warnings = "deny"
+
+[lints.clippy]
+# Allow unstable/opinionated lints (lower priority so individual lints can override)
+nursery = { level = "allow", priority = -1 }
+
+# Enforce pedantic lints
+pedantic = "deny"
+
+# Core lint groups
+all = "deny"
+correctness = "deny"
+suspicious = "deny"
+perf = "deny"
+complexity = "deny"
+
+# Safety-critical lints
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+indexing_slicing = "deny"
+await_holding_lock = "deny"
+
+# Performance + memory reliability
+needless_borrow = "deny"
+needless_collect = "deny"
+large_stack_arrays = "deny"
 
 [dependencies]
 libc = "0.2"

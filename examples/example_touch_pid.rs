@@ -1,7 +1,10 @@
+#![allow(clippy::expect_used)]
+#![allow(clippy::match_wild_err_arm)]
+
 /// run with `cargo run --example example_touch_pid`
+use std::{fs::OpenOptions, process::Command};
+
 use fork::{Fork, daemon};
-use std::fs::OpenOptions;
-use std::process::Command;
 
 fn main() {
     match daemon(false, false) {
@@ -13,7 +16,7 @@ fn main() {
         }
         Ok(Fork::Parent(pid)) => {
             // touch file with name like pid
-            let file_name = format!("/tmp/{}.pid", pid);
+            let file_name = format!("/tmp/{pid}.pid");
             OpenOptions::new()
                 .write(true)
                 .create(true)

@@ -10,16 +10,26 @@
 //! - Absence of controlling terminal
 //!
 //! Note: These tests fork twice (the daemon pattern) so they run in separate
-//! processes to avoid terminating the test runner when daemon() calls exit(0).
+//! processes to avoid terminating the test runner when `daemon()` calls `exit(0)`.
+
+#![allow(clippy::expect_used)]
+#![allow(clippy::unwrap_used)]
+#![allow(clippy::panic)]
+#![allow(clippy::match_wild_err_arm)]
+#![allow(clippy::similar_names)]
+#![allow(clippy::uninlined_format_args)]
+#![allow(clippy::indexing_slicing)]
 
 mod common;
 
-use common::{get_unique_test_dir, setup_test_dir, wait_for_file};
-use fork::{Fork, daemon, fork};
 use std::{
     env, fs,
     process::{Command, exit},
 };
+
+use fork::{Fork, daemon, fork};
+
+use common::{get_unique_test_dir, setup_test_dir, wait_for_file};
 
 #[test]
 fn test_daemon_creates_detached_process() {

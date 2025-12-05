@@ -1,8 +1,17 @@
+#![allow(clippy::expect_used)]
+#![allow(clippy::unwrap_used)]
+#![allow(clippy::panic)]
+#![allow(clippy::uninlined_format_args)]
+#![allow(clippy::match_wild_err_arm)]
+
 /// run with `cargo run --example example_pipe`
+use std::{
+    io::prelude::*,
+    process::{Command, Stdio, exit},
+};
+
 use fork::{Fork, fork, setsid};
 use os_pipe::pipe;
-use std::io::prelude::*;
-use std::process::{Command, Stdio, exit};
 
 fn main() {
     // Create a pipe for communication

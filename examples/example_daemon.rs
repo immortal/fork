@@ -1,6 +1,10 @@
+#![allow(clippy::expect_used)]
+#![allow(clippy::match_wild_err_arm)]
+
 /// run with `cargo run --example example_daemon`
-use fork::{Fork, daemon};
 use std::process::Command;
+
+use fork::{Fork, daemon};
 
 fn main() {
     // Keep file descriptors open to print the pid of the daemon
@@ -12,7 +16,7 @@ fn main() {
                 .expect("failed to execute process");
         }
         Ok(Fork::Parent(pid)) => {
-            println!("daemon pid: {}", pid);
+            println!("daemon pid: {pid}");
         }
         Err(_) => {
             println!("Fork failed");

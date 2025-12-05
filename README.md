@@ -11,7 +11,7 @@ Library for creating a new process detached from the controlling terminal (daemo
 ## Features
 
 - ✅ **Minimal** - Small, focused library for process forking and daemonization
-- ✅ **Safe** - Comprehensive test coverage (35 tests: 13 unit + 17 integration + 5 doc)
+- ✅ **Safe** - Comprehensive test coverage (50 tests: 14 unit + 26 integration + 10 doc)
 - ✅ **Well-documented** - Extensive documentation with real-world examples
 - ✅ **Unix-first** - Built specifically for Unix-like systems (Linux, macOS, BSD)
 - ✅ **Edition 2024** - Uses latest Rust edition features
@@ -109,13 +109,14 @@ match fork() {
 - **`waitpid(pid)`** - Waits for child process to change state
 - **`getpgrp()`** - Returns the process group ID
 - **`chdir()`** - Changes current directory to `/`
-- **`close_fd()`** - Closes stdin, stdout, and stderr
+- **`redirect_stdio()`** - Redirects stdin/stdout/stderr to `/dev/null` (recommended)
+- **`close_fd()`** - Closes stdin, stdout, and stderr (legacy, use `redirect_stdio()` instead)
 
 See the [documentation](https://docs.rs/fork) for detailed usage.
 
 ## Process Tree Example
 
-When using `daemon(false, false)`, it will change directory to `/` and close the standard file descriptors.
+When using `daemon(false, false)`, it will change directory to `/` and redirect stdin/stdout/stderr to `/dev/null`.
 
 Test running:
 
@@ -166,9 +167,10 @@ This prevents the daemon from ever acquiring a controlling terminal.
 
 The library has comprehensive test coverage:
 
-- **13 unit tests** in `src/lib.rs`
-- **17 integration tests** in `tests/` directory
-- **5 documentation tests**
+- **14 unit tests** in `src/lib.rs`
+- **26 integration tests** in `tests/` directory (5 daemon + 7 fork + 7 integration + 7 stdio)
+- **10 documentation tests**
+- **50 total tests**
 
 Run tests:
 

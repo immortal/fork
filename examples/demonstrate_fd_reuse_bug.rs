@@ -1,3 +1,12 @@
+#![allow(clippy::expect_used)]
+#![allow(clippy::unwrap_used)]
+#![allow(clippy::panic)]
+#![allow(clippy::uninlined_format_args)]
+#![allow(clippy::match_wild_err_arm)]
+#![allow(clippy::cast_ptr_alignment)]
+#![allow(clippy::doc_markdown)]
+#![allow(clippy::ptr_as_ptr)]
+
 /// Educational demonstration of the file descriptor reuse bug
 ///
 /// This example shows:
@@ -5,11 +14,9 @@
 /// 2. The FIX: How redirect_stdio() prevents fd reuse
 ///
 /// Run with: cargo run --example demonstrate_fd_reuse_bug
+use std::{fs::File, io::Write, os::unix::io::AsRawFd, process::exit};
+
 use fork::{Fork, close_fd, fork, redirect_stdio, waitpid};
-use std::fs::File;
-use std::io::Write;
-use std::os::unix::io::AsRawFd;
-use std::process::exit;
 
 fn main() {
     println!("\n╔═══════════════════════════════════════════════════════════════╗");
