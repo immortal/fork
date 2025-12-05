@@ -17,11 +17,14 @@
 #![allow(clippy::uninlined_format_args)]
 #![allow(clippy::indexing_slicing)]
 
-use std::process::exit;
-
 use fork::{Fork, fork, waitpid, waitpid_nohang};
 use libc::{WEXITSTATUS, WIFEXITED, WIFSIGNALED, WTERMSIG};
-use std::time::Duration;
+use std::{
+    process::exit,
+    sync::atomic::{AtomicBool, Ordering},
+    thread,
+    time::Duration,
+};
 
 #[test]
 fn test_waitpid_invalid_pid() {
@@ -301,6 +304,52 @@ fn test_waitpid_returns_raw_status() {
             assert_eq!(exit_code, 123);
         }
         Ok(Fork::Child) => exit(123),
+        Err(_) => panic!("Fork failed"),
+    }
+}
+
+#[test]
+fn test_waitpid_retries_on_eintr() {
+    extern "C" fn handle_sigusr1(_sig: libc::c_int) {
+        SIGNAL_RECEIVED.store(true, Ordering::SeqCst);
+    }
+
+    static SIGNAL_RECEIVED: AtomicBool = AtomicBool::new(false);
+
+    // Reset between potential re-runs
+    SIGNAL_RECEIVED.store(false, Ordering::SeqCst);
+
+    // Install a minimal handler so SIGUSR1 interrupts waitpid
+    unsafe {
+        libc::signal(libc::SIGUSR1, handle_sigusr1 as usize);
+    }
+
+    match fork() {
+        Ok(Fork::Parent(child)) => {
+            let parent_pid = unsafe { libc::getpid() };
+            let signal_thread = thread::spawn(move || {
+                thread::sleep(Duration::from_millis(10));
+                unsafe {
+                    libc::kill(parent_pid, libc::SIGUSR1);
+                }
+            });
+
+            let status = waitpid(child).expect("waitpid failed after EINTR");
+            assert!(WIFEXITED(status));
+
+            signal_thread
+                .join()
+                .expect("signal thread should not panic");
+            assert!(
+                SIGNAL_RECEIVED.load(Ordering::SeqCst),
+                "Signal handler should have run"
+            );
+        }
+        Ok(Fork::Child) => {
+            // Sleep long enough for parent to block and be interrupted
+            std::thread::sleep(Duration::from_millis(50));
+            exit(0);
+        }
         Err(_) => panic!("Fork failed"),
     }
 }

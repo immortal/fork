@@ -156,6 +156,8 @@ pub fn chdir() -> io::Result<()> {
 ///
 /// # Errors
 /// Returns an [`io::Error`] if any of the file descriptors fail to close.
+/// Already-closed descriptors (`EBADF`) are treated as success so the
+/// function is idempotent.
 ///
 /// # Example
 ///
@@ -169,9 +171,20 @@ pub fn chdir() -> io::Result<()> {
 pub fn close_fd() -> io::Result<()> {
     for fd in 0..=2 {
         if unsafe { libc::close(fd) } == -1 {
-            return Err(io::Error::last_os_error());
+            let err = io::Error::last_os_error();
+
+            // Check if the error is EBADF (Bad file descriptor),
+            // which indicates the FD was already closed. This is non-fatal.
+            if err.raw_os_error() == Some(libc::EBADF) {
+                continue; // already closed; treat as success for idempotency
+            }
+
+            // For any other error (EIO, EINTR, etc.), return the error.
+            // Note: EINTR is not typically returned by close(), but we handle others.
+            return Err(err);
         }
     }
+
     Ok(())
 }
 
@@ -493,6 +506,7 @@ pub fn waitpid_nohang(pid: libc::pid_t) -> io::Result<Option<libc::c_int>> {
 #[must_use = "session ID should be used or checked for errors"]
 pub fn setsid() -> io::Result<libc::pid_t> {
     let res = unsafe { libc::setsid() };
+
     match res {
         -1 => Err(io::Error::last_os_error()),
         res => Ok(res),
@@ -523,6 +537,7 @@ pub fn setsid() -> io::Result<libc::pid_t> {
 #[must_use = "process group ID should be used"]
 pub fn getpgrp() -> io::Result<libc::pid_t> {
     let res = unsafe { libc::getpgrp() };
+
     match res {
         -1 => Err(io::Error::last_os_error()),
         res => Ok(res),
@@ -627,6 +642,7 @@ pub fn daemon(nochdir: bool, noclose: bool) -> io::Result<Fork> {
             if !noclose {
                 redirect_stdio()?;
             }
+
             // 3. Second Fork (Double-fork): drop session leader, keep only the daemon
             match fork()? {
                 Fork::Parent(_) => exit(0),
@@ -856,6 +872,25 @@ mod tests {
                     Ok(_) => exit(0),
                     Err(_) => exit(1),
                 }
+            }
+            Err(_) => panic!("Fork failed"),
+        }
+    }
+
+    #[test]
+    fn test_close_fd_idempotent() {
+        match fork() {
+            Ok(Fork::Parent(child)) => {
+                let status = waitpid(child).expect("waitpid failed");
+                assert!(WIFEXITED(status));
+                assert_eq!(WEXITSTATUS(status), 0);
+            }
+            Ok(Fork::Child) => {
+                // First close should succeed
+                close_fd().expect("first close_fd failed");
+                // Second close should treat EBADF as success
+                close_fd().expect("second close_fd failed");
+                exit(0);
             }
             Err(_) => panic!("Fork failed"),
         }
