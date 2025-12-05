@@ -1,5 +1,5 @@
 test: fmt clippy
-  cargo test
+  RUST_TEST_THREADS=1 cargo test
 
 fmt:
   cargo fmt --all -- --check

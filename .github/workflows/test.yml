@@ -12,7 +12,7 @@ jobs:
     name: Format
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Format
@@ -22,7 +22,7 @@ jobs:
     name: Clippy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Clippy
@@ -32,7 +32,7 @@ jobs:
     name: Check
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Check
@@ -53,11 +53,11 @@ jobs:
       - lint
       - check
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
 
       - name: test
-        run: cargo test
+        run: RUST_TEST_THREADS=1 cargo test
 
       - name: Cleanup orphaned test processes
         if: always()
@@ -71,13 +71,13 @@ jobs:
     name: Coverage
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@nightly
         with:
           components: llvm-tools-preview
 
       - name: Run tests
-        run: cargo test --verbose -- --nocapture
+        run: RUST_TEST_THREADS=1 cargo test --verbose -- --nocapture
         env:
           RUST_BACKTRACE: full
           CARGO_INCREMENTAL: 0

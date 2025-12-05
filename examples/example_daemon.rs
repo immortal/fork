@@ -7,19 +7,17 @@ use std::process::Command;
 use fork::{Fork, daemon};
 
 fn main() {
-    // Keep file descriptors open to print the pid of the daemon
+    // Keep stdio open (noclose = true) so we can print the daemon PID
     match daemon(false, true) {
         Ok(Fork::Child) => {
+            println!("daemon pid: {}", std::process::id());
             Command::new("sleep")
                 .arg("300")
                 .output()
                 .expect("failed to execute process");
         }
-        Ok(Fork::Parent(pid)) => {
-            println!("daemon pid: {pid}");
-        }
-        Err(_) => {
-            println!("Fork failed");
-        }
+        // Parent exits inside daemon(); this arm is unreachable.
+        Ok(Fork::Parent(_)) => unreachable!("daemon exits parent processes"),
+        Err(err) => eprintln!("daemon failed: {err}"),
     }
 }

@@ -22,8 +22,13 @@
   - Async-signal-safety requirements
   - Signal handler inheritance
   - Memory copy-on-write behavior
+* **Daemon correctness** - `daemon()` now performs the full double-fork, exiting the intermediate session leader so only the daemon continues (matches docs/tests)
+  - Docs clarified the numbered double-fork stages
+  - Examples updated (`example_daemon.rs`, `example_touch_pid.rs`) to reflect that only the daemon process returns `Fork::Child`
+* **waitpid robustness** - `waitpid()` now takes `pid_t`, retries on `EINTR`, and returns the raw status code for callers to inspect
 * **Code quality** - Simplified `daemon()` implementation using `?` operator consistently
 * **Test coverage** - Increased to 50 tests (14 unit + 26 integration + 10 doc)
+* **CI** - GitHub Actions now run tests serially (`RUST_TEST_THREADS=1`) and use the latest checkout action
 
 ### Examples
 * Added `supervisor.rs` - Basic process supervisor example

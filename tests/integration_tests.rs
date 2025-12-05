@@ -38,7 +38,7 @@ fn test_double_fork_daemon_pattern() {
             // Original parent waits for daemon to create PID file
             // Use longer timeout for CI environments
             assert!(
-                wait_for_file(&daemon_pid_file, 1000),
+                wait_for_file(&daemon_pid_file, 3000),
                 "Daemon PID file should exist"
             );
 

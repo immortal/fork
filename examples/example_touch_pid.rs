@@ -9,23 +9,23 @@ use fork::{Fork, daemon};
 fn main() {
     match daemon(false, false) {
         Ok(Fork::Child) => {
+            // Touch a PID file from the daemon process itself
+            let file_name = format!("/tmp/{}.pid", std::process::id());
+            OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&file_name)
+                .expect("failed to open file");
+
+            // Do some work
             Command::new("sleep")
                 .arg("300")
                 .output()
                 .expect("failed to execute process");
         }
-        Ok(Fork::Parent(pid)) => {
-            // touch file with name like pid
-            let file_name = format!("/tmp/{pid}.pid");
-            OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .open(file_name)
-                .expect("failed to open file");
-        }
-        Err(_) => {
-            println!("Fork failed");
-        }
+        // Parent exits inside daemon(); this arm is unreachable.
+        Ok(Fork::Parent(_)) => unreachable!("daemon exits parent processes"),
+        Err(err) => eprintln!("daemon failed: {err}"),
     }
 }

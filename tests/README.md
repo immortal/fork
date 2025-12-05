@@ -6,11 +6,12 @@ This directory contains integration tests for the `fork` library. These tests ru
 
 The integration tests are organized into four files:
 - **`daemon_tests.rs`** - 5 tests for daemon functionality
-- **`fork_tests.rs`** - 7 tests for fork/waitpid functionality  
-- **`integration_tests.rs`** - 5 tests for advanced patterns
+- **`fork_tests.rs`** - 7 tests for fork/waitpid functionality
+- **`integration_tests.rs`** - 7 tests for advanced patterns
+- **`stdio_redirect_tests.rs`** - 7 tests for stdio redirection and fd safety
 - **`common/mod.rs`** - Shared test utilities
 
-**Total: 17 integration tests** providing comprehensive coverage of process management, daemon creation, and fork patterns.
+**Total: 26 integration tests** providing comprehensive coverage of process management, daemon creation, stdio safety, and fork patterns.
 
 ## Test Files
 
@@ -41,7 +42,7 @@ Tests include:
 - **test_fork_child_has_different_pid** - PID uniqueness between parent and child
 - **test_waitpid_waits_for_child** - Proper parent-child synchronization
 
-### `integration_tests.rs` - Advanced Pattern Tests (5 tests)
+### `integration_tests.rs` - Advanced Pattern Tests (7 tests)
 
 Tests complex usage patterns combining multiple operations. Documents real-world daemon scenarios.
 
@@ -50,7 +51,22 @@ Tests include:
 - **test_setsid_creates_new_session** - Session management and session leader verification
 - **test_chdir_changes_directory** - Directory changes in child processes
 - **test_process_isolation** - File system isolation between parent/child (separate memory)
+- **test_chdir_error_handling** - Ensures chdir propagates errors correctly
+- **test_chdir_returns_io_error** - Verifies error types returned from chdir
 - **test_getpgrp_returns_process_group** - Process group queries and verification
+
+### `stdio_redirect_tests.rs` - Stdio Redirection Tests (7 tests)
+
+Tests stdin/stdout/stderr safety and fd reuse protection.
+
+Tests include:
+- **test_redirect_stdio_prevents_fd_reuse** - Ensures `/dev/null` redirection blocks fd reuse
+- **test_redirect_stdio_idempotent** - Multiple calls are safe
+- **test_redirect_stdio_println_safety** - `println!` goes to `/dev/null` after redirect
+- **test_daemon_uses_redirect_stdio** - Confirms `daemon()` uses redirect_stdio
+- **test_redirect_stdio_error_handling** - Propagates errors from failed redirection
+- **test_fd_reuse_corruption_scenario** - Demonstrates corruption risk when closing stdio
+- **test_close_fd_allows_fd_reuse`** - Shows fd reuse when stdio is closed (expected panic)
 
 ### `common/mod.rs` - Shared Test Utilities
 
@@ -66,6 +82,9 @@ Provides reusable helper functions to reduce code duplication:
 ```bash
 # Run all tests (unit + integration + doc)
 cargo test
+
+# For more stable process-based tests (avoid rare flakiness), run serially
+RUST_TEST_THREADS=1 cargo test
 
 # Run only integration tests
 cargo test --tests
@@ -110,7 +129,7 @@ fn test_name() {
     // 3. Third step
     // 4. Fourth step
     // 5. Final verification
-    
+
     [test implementation]
 }
 ```
@@ -152,7 +171,6 @@ Integration tests provide coverage for:
 - **Double-fork pattern** - Standard daemon creation technique
 - **PID management** - Process ID tracking and verification
 
-These tests complement the 13 unit tests in `src/lib.rs` and 5 doc tests to provide **comprehensive coverage** (35 total tests) of the library's functionality.
 
 ## Module Structure
 
@@ -165,6 +183,3 @@ tests/
 ├── integration_tests.rs # Advanced tests (226 lines, 5 tests)
 └── README.md           # This file
 ```
-
-Total: **827 lines** of well-documented integration test code with **~160 lines** of explanatory comments.
-

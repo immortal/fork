@@ -106,7 +106,7 @@ match fork() {
   - `nochdir`: if `false`, changes working directory to `/`
   - `noclose`: if `false`, redirects stdin/stdout/stderr to `/dev/null`
 - **`setsid()`** - Creates a new session and sets the process group ID
-- **`waitpid(pid)`** - Waits for child process to change state
+- **`waitpid(pid)`** - Waits for child process to change state (returns raw status; retries on signals)
 - **`getpgrp()`** - Returns the process group ID
 - **`chdir()`** - Changes current directory to `/`
 - **`redirect_stdio()`** - Redirects stdin/stdout/stderr to `/dev/null` (recommended)
@@ -164,13 +164,6 @@ The `daemon()` function implements the classic double-fork pattern:
 This prevents the daemon from ever acquiring a controlling terminal.
 
 ## Testing
-
-The library has comprehensive test coverage:
-
-- **14 unit tests** in `src/lib.rs`
-- **26 integration tests** in `tests/` directory (5 daemon + 7 fork + 7 integration + 7 stdio)
-- **10 documentation tests**
-- **50 total tests**
 
 Run tests:
 
