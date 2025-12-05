@@ -1,4 +1,11 @@
-## 0.4.1
+## 0.5.0
+
+### Breaking Changes
+* **`waitpid()` return type changed** - Now returns `io::Result<libc::c_int>` instead of `io::Result<()>`
+  - Returns the raw status code for inspection with `WIFEXITED`, `WEXITSTATUS`, `WIFSIGNALED`, `WTERMSIG`, etc.
+  - Migration: Change `waitpid(pid)?` to `let status = waitpid(pid)?; assert!(WIFEXITED(status));`
+  - Enables proper exit code checking and signal detection
+  - See updated examples in documentation
 
 ### Added
 * **Fork helper methods** - Added convenience methods to `Fork` enum
@@ -13,26 +20,82 @@
   - `daemon()` - Must check daemon result
   - `setsid()` - Must use session ID
   - `getpgrp()` - Must use process group ID
+* **`waitpid_nohang()` function** - Non-blocking variant of `waitpid()`
+  - Returns `Ok(Some(status))` if child has exited
+  - Returns `Ok(None)` if child is still running
+  - Essential for process supervisors and event loops
+  - Enables polling patterns without blocking
+  - Includes 7 comprehensive tests
+* **PID helper functions** - Convenience wrappers for getting process IDs
+  - `getpid()` - Get current process ID (always succeeds, hides unsafe)
+  - `getppid()` - Get parent process ID (always succeeds, hides unsafe)
+* **Status macro re-exports** - Convenient access to status inspection macros
+  - Re-export `WIFEXITED`, `WEXITSTATUS`, `WIFSIGNALED`, `WTERMSIG` from libc
+  - Users can now `use fork::{waitpid, WIFEXITED, WEXITSTATUS}` instead of separate libc import
+* **Comprehensive test suite** - Added extensive tests covering critical edge cases
+  - `tests/waitpid_tests.rs` - Exit codes, signals, error handling, and non-blocking waits
+  - `tests/error_handling_tests.rs` - Error paths and type verification
+  - `tests/pid_tests.rs` - PID helper functions (getpid, getppid)
+  - `tests/status_macro_tests.rs` - Status macro re-exports
 
 ### Improved
-* **Performance** - Added `#[inline]` hints to thin wrapper functions (`chdir`, `setsid`, `getpgrp`)
-* **Documentation** - Enhanced `fork()` with comprehensive safety considerations
-  - File descriptor inheritance and shared state
-  - Mutex/lock consistency issues in multi-threaded programs
-  - Async-signal-safety requirements
-  - Signal handler inheritance
-  - Memory copy-on-write behavior
-* **Daemon correctness** - `daemon()` now performs the full double-fork, exiting the intermediate session leader so only the daemon continues (matches docs/tests)
+* **Performance** - Added `#[inline]` hints to thin wrapper functions (`chdir`, `setsid`, `getpgrp`, `getpid`, `getppid`)
+* **Documentation** - Enhanced with comprehensive examples and safety considerations
+  - Added doc test for `setsid()` - Session creation example
+  - Added doc test for `getpgrp()` - Process group query example
+  - Added doc test for `getpid()` - Current PID example
+  - Added doc test for `getppid()` - Parent PID example
+  - Enhanced `fork()` with safety considerations (file descriptors, mutexes, async-signal-safety, signals, memory)
+  - Enhanced `waitpid()` with status inspection examples
+  - Added `waitpid_nohang()` with polling patterns and process supervisor examples
+* **Daemon correctness** - `daemon()` now performs the full double-fork, exiting the intermediate session leader so only the daemon continues
   - Docs clarified the numbered double-fork stages
   - Examples updated (`example_daemon.rs`, `example_touch_pid.rs`) to reflect that only the daemon process returns `Fork::Child`
-* **waitpid robustness** - `waitpid()` now takes `pid_t`, retries on `EINTR`, and returns the raw status code for callers to inspect
+* **waitpid robustness** - Automatic retry on `EINTR` (signal interruption)
+  - Takes `pid_t` instead of `i32` for better type safety
+  - Returns raw status code enabling exit code inspection and signal detection
 * **Code quality** - Simplified `daemon()` implementation using `?` operator consistently
-* **Test coverage** - Increased to 50 tests (14 unit + 26 integration + 10 doc)
+* **Test coverage** - Comprehensive coverage of all error paths and edge cases
+  - Error handling: Invalid PID (ECHILD), double-wait, session leader errors (EPERM)
+  - Exit codes: 0, 1, 42, 127, 255, and multiple code variations
+  - Signal termination: SIGKILL, SIGTERM, SIGABRT detection
+  - Status inspection: WIFEXITED vs WIFSIGNALED distinction
+  - Fork helper methods: `is_parent()`, `is_child()`, `child_pid()`
+  - io::Error type verification for all functions
 * **CI** - GitHub Actions now run tests serially (`RUST_TEST_THREADS=1`) and use the latest checkout action
 
 ### Examples
 * Added `supervisor.rs` - Basic process supervisor example
 * Added `supervisor_advanced.rs` - Production-ready supervisor with restart policies
+
+### Migration Guide (0.4.x → 0.5.0)
+
+#### Before (0.4.x):
+```rust
+match fork() {
+    Ok(Fork::Parent(child)) => {
+        waitpid(child)?; // Just waits, no status
+    }
+    Ok(Fork::Child) => exit(0),
+    Err(e) => eprintln!("Fork failed: {}", e),
+}
+```
+
+#### After (0.5.0):
+```rust
+use libc::{WIFEXITED, WEXITSTATUS};
+
+match fork() {
+    Ok(Fork::Parent(child)) => {
+        let status = waitpid(child)?; // Returns status code
+        assert!(WIFEXITED(status), "Child should exit normally");
+        let exit_code = WEXITSTATUS(status);
+        println!("Child exited with code: {}", exit_code);
+    }
+    Ok(Fork::Child) => exit(0),
+    Err(e) => eprintln!("Fork failed: {}", e),
+}
+```
 
 ## 0.4.0
 

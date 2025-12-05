@@ -15,6 +15,11 @@
 
 use std::{ffi::CString, io, process::exit};
 
+// Re-export libc status inspection macros for convenience
+// This allows users to write `use fork::{waitpid, WIFEXITED, WEXITSTATUS}`
+// instead of importing from libc separately
+pub use libc::{WEXITSTATUS, WIFEXITED, WIFSIGNALED, WTERMSIG};
+
 /// Fork result
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Fork {
@@ -361,6 +366,94 @@ pub fn waitpid(pid: libc::pid_t) -> io::Result<libc::c_int> {
     }
 }
 
+/// Wait for process to change status without blocking [see wait(2)](https://man.freebsd.org/cgi/man.cgi?waitpid)
+///
+/// This is the non-blocking variant of [`waitpid()`]. It checks if the child has
+/// changed status and returns immediately without blocking.
+///
+/// # Return Value
+/// - `Ok(Some(status))` - Child has exited/stopped with the given status
+/// - `Ok(None)` - Child is still running (no state change)
+/// - `Err(...)` - Error occurred (e.g., ECHILD if child doesn't exist)
+///
+/// # Behavior
+/// - Returns immediately (does not block)
+/// - Retries automatically on `EINTR` (interrupted by signal)
+/// - Returns the raw status (use `libc::WIFEXITED`, `libc::WEXITSTATUS`, etc.)
+///
+/// # Use Cases
+/// - **Process supervisors** - Monitor multiple children without blocking
+/// - **Event loops** - Check child status while handling other events
+/// - **Polling patterns** - Parent has other work to do while child runs
+/// - **Non-blocking checks** - Determine if child is still running
+///
+/// # Example
+///
+/// ```
+/// use fork::{fork, Fork, waitpid_nohang};
+/// use std::time::Duration;
+///
+/// match fork::fork() {
+///     Ok(Fork::Parent(child)) => {
+///         // Do work while child runs
+///         for i in 0..5 {
+///             println!("Parent working... iteration {}", i);
+///             std::thread::sleep(Duration::from_millis(100));
+///
+///             match waitpid_nohang(child) {
+///                 Ok(Some(status)) => {
+///                     println!("Child exited with status: {}", status);
+///                     break;
+///                 }
+///                 Ok(None) => {
+///                     println!("Child still running...");
+///                 }
+///                 Err(e) => {
+///                     eprintln!("Error checking child: {}", e);
+///                     break;
+///                 }
+///             }
+///         }
+///     }
+///     Ok(Fork::Child) => {
+///         // Child does work
+///         std::thread::sleep(Duration::from_millis(250));
+///         std::process::exit(0);
+///     }
+///     Err(e) => eprintln!("Fork failed: {}", e),
+/// }
+/// ```
+///
+/// # Errors
+/// Returns an [`io::Error`] if the waitpid system call fails. Common errors include:
+/// - No child process exists with the given PID (ECHILD)
+/// - Invalid options or PID
+pub fn waitpid_nohang(pid: libc::pid_t) -> io::Result<Option<libc::c_int>> {
+    let mut status: libc::c_int = 0;
+    loop {
+        // SAFETY: &raw mut status provides a raw pointer to initialized memory
+        let res = unsafe { libc::waitpid(pid, &raw mut status, libc::WNOHANG) };
+
+        if res == 0 {
+            // Child has not changed state (still running)
+            return Ok(None);
+        }
+
+        if res == -1 {
+            let err = io::Error::last_os_error();
+
+            if err.kind() == io::ErrorKind::Interrupted {
+                continue; // Retry on EINTR
+            }
+
+            return Err(err);
+        }
+
+        // Child changed state (exited, stopped, continued, etc.)
+        return Ok(Some(status));
+    }
+}
+
 /// Create session and set process group ID [see setsid(2)](https://www.freebsd.org/cgi/man.cgi?setsid)
 ///
 /// Upon successful completion, the `setsid()` system call returns the value of the
@@ -370,6 +463,32 @@ pub fn waitpid(pid: libc::pid_t) -> io::Result<libc::c_int> {
 /// # Errors
 /// Returns an [`io::Error`] if the setsid system call fails. Common errors include:
 /// - The calling process is already a process group leader (EPERM)
+///
+/// # Example
+///
+/// ```
+/// use fork::{fork, Fork, setsid};
+///
+/// match fork::fork() {
+///     Ok(Fork::Parent(child)) => {
+///         println!("Parent process, child PID: {}", child);
+///     }
+///     Ok(Fork::Child) => {
+///         // Create new session
+///         match setsid() {
+///             Ok(sid) => {
+///                 println!("New session ID: {}", sid);
+///                 std::process::exit(0);
+///             }
+///             Err(e) => {
+///                 eprintln!("Failed to create session: {}", e);
+///                 std::process::exit(1);
+///             }
+///         }
+///     }
+///     Err(e) => eprintln!("Fork failed: {}", e),
+/// }
+/// ```
 #[inline]
 #[must_use = "session ID should be used or checked for errors"]
 pub fn setsid() -> io::Result<libc::pid_t> {
@@ -385,6 +504,21 @@ pub fn setsid() -> io::Result<libc::pid_t> {
 /// # Errors
 /// This function should not fail under normal circumstances, but returns
 /// an [`io::Error`] if the system call fails.
+///
+/// # Example
+///
+/// ```
+/// use fork::getpgrp;
+///
+/// match getpgrp() {
+///     Ok(pgid) => {
+///         println!("Current process group ID: {}", pgid);
+///     }
+///     Err(e) => {
+///         eprintln!("Failed to get process group: {}", e);
+///     }
+/// }
+/// ```
 #[inline]
 #[must_use = "process group ID should be used"]
 pub fn getpgrp() -> io::Result<libc::pid_t> {
@@ -393,6 +527,44 @@ pub fn getpgrp() -> io::Result<libc::pid_t> {
         -1 => Err(io::Error::last_os_error()),
         res => Ok(res),
     }
+}
+
+/// Get the current process ID [see getpid(2)](https://man.freebsd.org/cgi/man.cgi?getpid)
+///
+/// Returns the process ID of the calling process. This function is always successful.
+///
+/// # Example
+///
+/// ```
+/// use fork::getpid;
+///
+/// let my_pid = getpid();
+/// println!("My process ID: {}", my_pid);
+/// ```
+#[inline]
+#[must_use = "process ID should be used"]
+pub fn getpid() -> libc::pid_t {
+    // SAFETY: getpid() has no preconditions and always succeeds
+    unsafe { libc::getpid() }
+}
+
+/// Get the parent process ID [see getppid(2)](https://man.freebsd.org/cgi/man.cgi?getppid)
+///
+/// Returns the process ID of the parent of the calling process. This function is always successful.
+///
+/// # Example
+///
+/// ```
+/// use fork::getppid;
+///
+/// let parent_pid = getppid();
+/// println!("My parent's process ID: {}", parent_pid);
+/// ```
+#[inline]
+#[must_use = "process ID should be used"]
+pub fn getppid() -> libc::pid_t {
+    // SAFETY: getppid() has no preconditions and always succeeds
+    unsafe { libc::getppid() }
 }
 
 /// The daemon function is for programs wishing to detach themselves from the

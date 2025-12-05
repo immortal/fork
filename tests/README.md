@@ -4,18 +4,22 @@ This directory contains integration tests for the `fork` library. These tests ru
 
 ## Overview
 
-The integration tests are organized into four files:
-- **`daemon_tests.rs`** - 5 tests for daemon functionality
-- **`fork_tests.rs`** - 7 tests for fork/waitpid functionality
-- **`integration_tests.rs`** - 7 tests for advanced patterns
-- **`stdio_redirect_tests.rs`** - 7 tests for stdio redirection and fd safety
+The integration tests are organized into eight files:
+- **`daemon_tests.rs`** - Daemon functionality
+- **`fork_tests.rs`** - Fork/waitpid functionality
+- **`integration_tests.rs`** - Advanced patterns
+- **`stdio_redirect_tests.rs`** - Stdio redirection and fd safety
+- **`waitpid_tests.rs`** - Exit codes, signals, error handling, and non-blocking waits
+- **`error_handling_tests.rs`** - Error paths and type verification
+- **`pid_tests.rs`** - PID helper functions (getpid, getppid)
+- **`status_macro_tests.rs`** - Status macro re-exports
 - **`common/mod.rs`** - Shared test utilities
 
-**Total: 26 integration tests** providing comprehensive coverage of process management, daemon creation, stdio safety, and fork patterns.
+Comprehensive coverage of process management, daemon creation, stdio safety, fork patterns, exit status handling, non-blocking waits, PID helpers, status macros, and error scenarios.
 
 ## Test Files
 
-### `daemon_tests.rs` - Daemon Functionality Tests (5 tests)
+### `daemon_tests.rs` - Daemon Functionality Tests
 
 Tests the `daemon()` function with real process daemonization. Each test documents:
 - What is being tested
@@ -29,7 +33,7 @@ Tests include:
 - **test_daemon_with_command_execution** - Tests command execution in daemon context
 - **test_daemon_no_controlling_terminal** - Verifies daemon has no controlling terminal
 
-### `fork_tests.rs` - Fork Functionality Tests (7 tests)
+### `fork_tests.rs` - Fork Functionality Tests
 
 Tests the core `fork()` and `waitpid()` functions. Each test explains the expected parent-child behavior.
 
@@ -42,7 +46,7 @@ Tests include:
 - **test_fork_child_has_different_pid** - PID uniqueness between parent and child
 - **test_waitpid_waits_for_child** - Proper parent-child synchronization
 
-### `integration_tests.rs` - Advanced Pattern Tests (7 tests)
+### `integration_tests.rs` - Advanced Pattern Tests
 
 Tests complex usage patterns combining multiple operations. Documents real-world daemon scenarios.
 
@@ -55,7 +59,7 @@ Tests include:
 - **test_chdir_returns_io_error** - Verifies error types returned from chdir
 - **test_getpgrp_returns_process_group** - Process group queries and verification
 
-### `stdio_redirect_tests.rs` - Stdio Redirection Tests (7 tests)
+### `stdio_redirect_tests.rs` - Stdio Redirection Tests
 
 Tests stdin/stdout/stderr safety and fd reuse protection.
 
@@ -66,7 +70,49 @@ Tests include:
 - **test_daemon_uses_redirect_stdio** - Confirms `daemon()` uses redirect_stdio
 - **test_redirect_stdio_error_handling** - Propagates errors from failed redirection
 - **test_fd_reuse_corruption_scenario** - Demonstrates corruption risk when closing stdio
-- **test_close_fd_allows_fd_reuse`** - Shows fd reuse when stdio is closed (expected panic)
+- **test_close_fd_allows_fd_reuse** - Shows fd reuse when stdio is closed (expected panic)
+
+### `waitpid_tests.rs` - Waitpid Comprehensive Tests
+
+Tests all aspects of the `waitpid()` and `waitpid_nohang()` functions including error handling, exit codes, signal termination, and non-blocking waits.
+
+**Blocking waitpid() tests:**
+- **test_waitpid_invalid_pid** - ECHILD error for non-existent PID
+- **test_waitpid_double_wait** - ECHILD error for already-waited child
+- **test_waitpid_exit_code_zero** - Exit code 0 handling
+- **test_waitpid_exit_code_one** - Exit code 1 handling
+- **test_waitpid_exit_code_42** - Arbitrary exit code handling
+- **test_waitpid_exit_code_127** - Command not found exit code
+- **test_waitpid_multiple_exit_codes** - Tests codes 0,1,2,42,100,127,255
+- **test_waitpid_signal_termination_sigkill** - SIGKILL detection
+- **test_waitpid_signal_termination_sigterm** - SIGTERM detection
+- **test_waitpid_signal_termination_sigabrt** - SIGABRT (abort) detection
+- **test_waitpid_distinguishes_exit_vs_signal** - WIFEXITED vs WIFSIGNALED
+- **test_waitpid_returns_raw_status** - Raw status code return verification
+
+**Non-blocking waitpid_nohang() tests:**
+- **test_waitpid_nohang_child_still_running** - Returns None when child running
+- **test_waitpid_nohang_child_exited** - Returns Some(status) when child exited
+- **test_waitpid_nohang_poll_until_exit** - Polling pattern until child exits
+- **test_waitpid_nohang_invalid_pid** - ECHILD error for non-existent PID
+- **test_waitpid_nohang_multiple_children** - Poll multiple children without blocking
+- **test_waitpid_nohang_returns_option** - Verify Option<c_int> return type
+- **test_waitpid_nohang_vs_blocking** - Compare blocking vs non-blocking behavior
+
+### `error_handling_tests.rs` - Error Path Tests
+
+Tests error scenarios and type verification for all library functions.
+
+Tests include:
+- **test_setsid_error_when_already_session_leader** - EPERM when calling setsid twice
+- **test_setsid_returns_io_error_type** - io::Error type and EPERM verification
+- **test_fork_returns_io_error_type** - io::Result<Fork> type verification
+- **test_waitpid_returns_io_error_type** - io::Result<c_int> type verification
+- **test_getpgrp_returns_io_error_type** - io::Result<pid_t> type verification
+- **test_close_fd_error_handling** - close_fd error scenarios
+- **test_error_kind_matching** - io::ErrorKind pattern matching
+- **test_fork_child_pid_method** - Fork::child_pid() correctness
+- **test_fork_is_parent_is_child_methods** - Fork::is_parent() and is_child()
 
 ### `common/mod.rs` - Shared Test Utilities
 
@@ -76,6 +122,36 @@ Provides reusable helper functions to reduce code duplication:
 - `setup_test_dir()` - Sets up and cleans test directory
 - `wait_for_file()` - Waits for file creation with timeout
 - `cleanup_test_dir()` - Removes test directory
+
+### `pid_tests.rs` - PID Helper Function Tests
+
+Tests the convenience wrapper functions for getting process IDs without requiring unsafe code.
+
+Tests include:
+- **test_getpid_returns_valid_pid** - Verifies `getpid()` returns valid positive PID
+- **test_getppid_returns_valid_pid** - Verifies `getppid()` returns valid parent PID
+- **test_getpid_different_in_child** - Confirms child has different PID from parent
+- **test_getpid_matches_fork_result** - Verifies `getpid()` matches fork's returned child PID
+- **test_getppid_returns_parent_pid** - Confirms child's parent PID matches parent's PID
+- **test_getpid_no_unsafe_in_user_code** - Proves user can call without unsafe block
+- **test_getppid_no_unsafe_in_user_code** - Proves parent PID getter hides unsafe
+- **test_pid_functions_in_multiple_forks** - Tests PID functions with multiple children
+- **test_getpid_consistency_across_operations** - Verifies PID stability during lifetime
+- **test_getppid_after_parent_exits** - Tests orphan reparenting to init (PID 1)
+
+### `status_macro_tests.rs` - Status Macro Re-export Tests
+
+Tests that status inspection macros can be imported from `fork` crate instead of requiring `libc`.
+
+Tests include:
+- **test_wifexited_macro_works** - Verifies `WIFEXITED` can be imported from fork
+- **test_wexitstatus_macro_works** - Verifies `WEXITSTATUS` can be imported from fork
+- **test_wifsignaled_macro_works** - Verifies `WIFSIGNALED` can be imported from fork
+- **test_wtermsig_macro_works** - Verifies `WTERMSIG` can be imported from fork
+- **test_all_macros_together** - Tests using all macros together for status inspection
+- **test_macros_with_multiple_exit_codes** - Tests macros work with various exit codes (0, 1, 42, 127, 255)
+- **test_macros_distinguish_exit_vs_signal** - Confirms macros correctly identify exit vs signal termination
+- **test_no_libc_import_needed** - Proves users don't need `libc` import for status macros
 
 ## Running Tests
 
@@ -170,6 +246,11 @@ Integration tests provide coverage for:
 - **Process isolation** - Memory separation and filesystem sharing
 - **Double-fork pattern** - Standard daemon creation technique
 - **PID management** - Process ID tracking and verification
+- **Exit status handling** - Exit codes (0-255) and status inspection
+- **Signal termination** - SIGKILL, SIGTERM, SIGABRT detection
+- **Error scenarios** - ECHILD, EPERM, and invalid input handling
+- **Type safety** - io::Error verification and error kind matching
+- **Fork helper methods** - is_parent(), is_child(), child_pid()
 
 
 ## Module Structure
@@ -177,9 +258,12 @@ Integration tests provide coverage for:
 ```
 tests/
 ├── common/
-│   └── mod.rs          # Shared utilities (51 lines)
-├── daemon_tests.rs     # Daemon tests (260 lines, 5 tests)
-├── fork_tests.rs       # Fork tests (290 lines, 7 tests)
-├── integration_tests.rs # Advanced tests (226 lines, 5 tests)
-└── README.md           # This file
+│   └── mod.rs               # Shared utilities (51 lines)
+├── daemon_tests.rs          # Daemon tests (271 lines, 5 tests)
+├── fork_tests.rs            # Fork tests (301 lines, 7 tests)
+├── integration_tests.rs     # Advanced tests (284 lines, 7 tests)
+├── stdio_redirect_tests.rs  # Stdio safety tests (313 lines, 7 tests)
+├── waitpid_tests.rs         # Waitpid tests (591 lines, 19 tests)
+├── error_handling_tests.rs  # Error tests (260 lines, 9 tests)
+└── README.md                # This file
 ```

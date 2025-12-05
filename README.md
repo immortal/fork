@@ -11,7 +11,7 @@ Library for creating a new process detached from the controlling terminal (daemo
 ## Features
 
 - ✅ **Minimal** - Small, focused library for process forking and daemonization
-- ✅ **Safe** - Comprehensive test coverage (50 tests: 14 unit + 26 integration + 10 doc)
+- ✅ **Safe** - Comprehensive test coverage across all APIs and edge cases
 - ✅ **Well-documented** - Extensive documentation with real-world examples
 - ✅ **Unix-first** - Built specifically for Unix-like systems (Linux, macOS, BSD)
 - ✅ **Edition 2024** - Uses latest Rust edition features
@@ -30,7 +30,7 @@ Add `fork` to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-fork = "0.4"
+fork = "0.5"
 ```
 
 Or use cargo-add:
@@ -61,14 +61,25 @@ fn main() {
 ### Simple Fork Example
 
 ```rust
-use fork::{fork, Fork};
+use fork::{fork, Fork, waitpid, WIFEXITED, WEXITSTATUS};
 
 match fork() {
     Ok(Fork::Parent(child)) => {
         println!("Parent process, child PID: {}", child);
+
+        // Wait for child and check exit status
+        match waitpid(child) {
+            Ok(status) => {
+                if WIFEXITED(status) {
+                    println!("Child exited with code: {}", WEXITSTATUS(status));
+                }
+            }
+            Err(e) => eprintln!("waitpid failed: {}", e),
+        }
     }
     Ok(Fork::Child) => {
         println!("Child process");
+        std::process::exit(0);
     }
     Err(e) => eprintln!("Fork failed: {}", e),
 }
@@ -106,11 +117,21 @@ match fork() {
   - `nochdir`: if `false`, changes working directory to `/`
   - `noclose`: if `false`, redirects stdin/stdout/stderr to `/dev/null`
 - **`setsid()`** - Creates a new session and sets the process group ID
-- **`waitpid(pid)`** - Waits for child process to change state (returns raw status; retries on signals)
+- **`waitpid(pid)`** - Waits for child process to change state (blocking; returns raw status; retries on signals)
+- **`waitpid_nohang(pid)`** - Checks child status without blocking (returns `Option<status>`; for supervisors/polling)
 - **`getpgrp()`** - Returns the process group ID
+- **`getpid()`** - Returns the current process ID
+- **`getppid()`** - Returns the parent process ID
 - **`chdir()`** - Changes current directory to `/`
 - **`redirect_stdio()`** - Redirects stdin/stdout/stderr to `/dev/null` (recommended)
 - **`close_fd()`** - Closes stdin, stdout, and stderr (legacy, use `redirect_stdio()` instead)
+
+### Status Inspection Macros (re-exported from libc)
+
+- **`WIFEXITED(status)`** - Check if child exited normally
+- **`WEXITSTATUS(status)`** - Get exit code (if exited normally)
+- **`WIFSIGNALED(status)`** - Check if child was terminated by signal
+- **`WTERMSIG(status)`** - Get terminating signal (if signaled)
 
 See the [documentation](https://docs.rs/fork) for detailed usage.
 

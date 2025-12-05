@@ -23,7 +23,7 @@ mod common;
 
 use std::{env, fs, process::exit, thread, time::Duration};
 
-use fork::{Fork, chdir, fork, getpgrp, setsid, waitpid};
+use fork::{Fork, chdir, fork, getpgrp, getpid, setsid, waitpid};
 
 use common::{get_test_dir, setup_test_dir, wait_for_file};
 
@@ -70,7 +70,7 @@ fn test_double_fork_daemon_pattern() {
                 }
                 Fork::Child => {
                     // This is the daemon process
-                    let pid = unsafe { libc::getpid() };
+                    let pid = getpid();
                     let pgid = getpgrp().expect("getpgrp failed");
 
                     // Write PID to file
