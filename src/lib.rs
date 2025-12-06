@@ -134,7 +134,7 @@
 //!
 //! Windows is **not supported** as it lacks `fork()` system call.
 
-use std::{ffi::CString, io, process::exit};
+use std::{ffi::CString, io};
 
 // Re-export libc status inspection macros for convenience
 // This allows users to write `use fork::{waitpid, WIFEXITED, WEXITSTATUS}`
@@ -742,7 +742,8 @@ pub fn getppid() -> libc::pid_t {
 pub fn daemon(nochdir: bool, noclose: bool) -> io::Result<Fork> {
     // 1. First fork: detach from original parent; parent exits immediately
     match fork()? {
-        Fork::Parent(_) => exit(0),
+        // SAFETY: _exit is async-signal-safe and avoids running any Rust/CRT destructors
+        Fork::Parent(_) => unsafe { libc::_exit(0) },
         Fork::Child => {
             // 2. Session setup in first child
             setsid()?;
@@ -755,7 +756,8 @@ pub fn daemon(nochdir: bool, noclose: bool) -> io::Result<Fork> {
 
             // 3. Second Fork (Double-fork): drop session leader, keep only the daemon
             match fork()? {
-                Fork::Parent(_) => exit(0),
+                // SAFETY: _exit avoids invoking non-async-signal-safe destructors in the forked process
+                Fork::Parent(_) => unsafe { libc::_exit(0) },
                 Fork::Child => Ok(Fork::Child),
             }
         }

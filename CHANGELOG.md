@@ -34,6 +34,7 @@
 
 ### Fixed
 * **Documentation warnings** - Resolved doctest warnings about main function wrapping
+* **Daemon exit safety** - Replaced `std::process::exit` in post-fork parents with `libc::_exit` to avoid running non-async-signal-safe destructors, preventing undefined behavior between `fork()` and `exec()`
 
 ## 0.5.0
 

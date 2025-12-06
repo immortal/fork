@@ -25,11 +25,11 @@ use std::{env, fs, process::exit, thread, time::Duration};
 
 use fork::{Fork, chdir, fork, getpgrp, getpid, setsid, waitpid};
 
-use common::{get_test_dir, setup_test_dir, wait_for_file};
+use common::{get_test_dir, get_unique_test_dir, setup_test_dir, wait_for_file};
 
 #[test]
 fn test_double_fork_daemon_pattern() {
-    let test_dir = setup_test_dir(get_test_dir("int_double_fork"));
+    let test_dir = setup_test_dir(get_unique_test_dir("int_double_fork"));
     let daemon_pid_file = test_dir.join("daemon.pid");
 
     // First fork
@@ -89,7 +89,7 @@ fn test_double_fork_daemon_pattern() {
 
 #[test]
 fn test_setsid_creates_new_session() {
-    let test_dir = setup_test_dir(get_test_dir("int_double_fork"));
+    let test_dir = setup_test_dir(get_unique_test_dir("int_setsid"));
     let session_file = test_dir.join("session.info");
 
     match fork().expect("Fork failed") {

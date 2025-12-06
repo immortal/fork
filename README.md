@@ -30,7 +30,7 @@ Add `fork` to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-fork = "0.5"
+fork = "0.6.0"
 ```
 
 Or use cargo-add:
