@@ -14,7 +14,13 @@
 #![allow(clippy::match_wild_err_arm)]
 #![allow(clippy::uninlined_format_args)]
 
-use std::{env, fs, path::PathBuf, process::exit, thread, time::Duration};
+use std::{
+    env, fs,
+    path::{Path, PathBuf},
+    process::exit,
+    thread,
+    time::Duration,
+};
 
 use fork::{Fork, WEXITSTATUS, WIFEXITED, chdir, fork, waitpid};
 
@@ -84,8 +90,13 @@ fn test_chdir_changes_actual_working_directory() {
             let new_dir = env::current_dir().expect("Failed to get new dir");
 
             // Verify change occurred
-            assert_ne!(original, new_dir, "Directory should have changed");
             assert_eq!(new_dir, PathBuf::from("/"), "Should be in root");
+            if original.as_path() != Path::new("/") {
+                assert_ne!(
+                    original, new_dir,
+                    "Directory should change when not already at /"
+                );
+            }
 
             exit(0);
         }
@@ -157,15 +168,10 @@ fn test_chdir_with_file_operations() {
             // Change to root
             chdir().expect("chdir failed");
 
-            // Try to read a file that should exist in root
-            // Most Unix systems have /etc or /bin
-            let etc_exists = fs::metadata("/etc").is_ok();
-            let bin_exists = fs::metadata("/bin").is_ok();
-
-            assert!(
-                etc_exists || bin_exists,
-                "Root directory should contain /etc or /bin"
-            );
+            // Confirm relative operations work from new cwd
+            let cwd = env::current_dir().expect("Failed to get current dir");
+            assert_eq!(cwd.to_str().unwrap(), "/");
+            fs::metadata(".").expect("Root directory metadata should be readable");
 
             exit(0);
         }
@@ -328,8 +334,7 @@ fn test_chdir_with_env_manipulation() {
         }
         Fork::Child => {
             // Modify environment
-            // SAFETY: We're in a child process that will exit immediately,
-            // and there are no other threads that could be reading env vars
+            // SAFETY: This child has no other threads and exits immediately after the test.
             unsafe {
                 env::set_var("PWD", "/some/fake/path");
             }

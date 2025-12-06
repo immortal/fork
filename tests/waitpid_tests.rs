@@ -324,8 +324,8 @@ fn test_waitpid_retries_on_eintr() {
     unsafe {
         let mut sa: libc::sigaction = std::mem::zeroed();
 
-        // Set the handler function
-        sa.sa_sigaction = handle_sigusr1 as usize;
+        // Set the handler function (cast via pointer to satisfy clippy lint)
+        sa.sa_sigaction = handle_sigusr1 as *const () as usize;
 
         // SA_RESTART would make interrupted syscalls restart automatically,
         // but we want to test EINTR handling, so we don't set it
