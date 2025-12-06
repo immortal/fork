@@ -134,7 +134,7 @@
 //!
 //! Windows is **not supported** as it lacks `fork()` system call.
 
-use std::{ffi::CString, io};
+use std::io;
 
 // Re-export libc status inspection macros for convenience
 // This allows users to write `use fork::{waitpid, WIFEXITED, WEXITSTATUS}`
@@ -270,15 +270,8 @@ impl Fork {
 ///
 #[inline]
 pub fn chdir() -> io::Result<()> {
-    // SAFETY: "/" is a valid C string with no null bytes
-    let dir = CString::new("/").map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "Failed to create C string for root directory",
-        )
-    })?;
-
-    let res = unsafe { libc::chdir(dir.as_ptr()) };
+    // SAFETY: c"/" is a valid null-terminated C string literal
+    let res = unsafe { libc::chdir(c"/".as_ptr()) };
 
     match res {
         -1 => Err(io::Error::last_os_error()),
@@ -361,13 +354,8 @@ pub fn close_fd() -> io::Result<()> {
 /// # Ok::<(), std::io::Error>(())
 /// ```
 pub fn redirect_stdio() -> io::Result<()> {
-    use std::ffi::CString;
-
-    let dev_null = CString::new("/dev/null")
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "CString::new failed"))?;
-
     let null_fd = loop {
-        let fd = unsafe { libc::open(dev_null.as_ptr(), libc::O_RDWR) };
+        let fd = unsafe { libc::open(c"/dev/null".as_ptr(), libc::O_RDWR) };
         if fd == -1 {
             let err = io::Error::last_os_error();
             if err.kind() == io::ErrorKind::Interrupted {
@@ -386,6 +374,8 @@ pub fn redirect_stdio() -> io::Result<()> {
                 if err.kind() == io::ErrorKind::Interrupted {
                     continue;
                 }
+                // Only close null_fd if it's > 2 (not one of the stdio fds we're duplicating to)
+                // If null_fd was 0, 1, or 2, we're in the process of duping it, so don't close
                 if null_fd > 2 {
                     let _ = close_retry(null_fd);
                 }

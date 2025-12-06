@@ -4,7 +4,7 @@ This directory contains integration tests for the `fork` library. These tests ru
 
 ## Overview
 
-The integration tests are organized into eight files:
+The integration tests are organized into nine files:
 - **`daemon_tests.rs`** - Daemon functionality
 - **`fork_tests.rs`** - Fork/waitpid functionality
 - **`integration_tests.rs`** - Advanced patterns
@@ -13,9 +13,10 @@ The integration tests are organized into eight files:
 - **`error_handling_tests.rs`** - Error paths and type verification
 - **`pid_tests.rs`** - PID helper functions (getpid, getppid)
 - **`status_macro_tests.rs`** - Status macro re-exports
+- **`chdir_tests.rs`** - Comprehensive chdir() function tests
 - **`common/mod.rs`** - Shared test utilities
 
-Comprehensive coverage of process management, daemon creation, stdio safety, fork patterns, exit status handling, non-blocking waits, PID helpers, status macros, and error scenarios.
+Comprehensive coverage of process management, daemon creation, stdio safety, fork patterns, exit status handling, non-blocking waits, PID helpers, status macros, directory operations, and error scenarios.
 
 ## Test Files
 
@@ -154,6 +155,24 @@ Tests include:
 - **test_macros_distinguish_exit_vs_signal** - Confirms macros correctly identify exit vs signal termination
 - **test_no_libc_import_needed** - Proves users don't need `libc` import for status macros
 
+### `chdir_tests.rs` - Comprehensive chdir() Function Tests
+
+Tests all aspects of the `chdir()` function including modern `c""` string literal implementation.
+
+Tests include:
+- **test_chdir_basic_success** - Verifies successful directory change to root
+- **test_chdir_returns_unit** - Confirms return type is `io::Result<()>`
+- **test_chdir_changes_actual_working_directory** - Validates real filesystem effects
+- **test_chdir_idempotent** - Tests multiple successive calls are safe
+- **test_chdir_process_isolation** - Verifies child chdir doesn't affect parent
+- **test_chdir_with_file_operations** - Tests relative path operations after chdir
+- **test_chdir_with_absolute_path_operations** - Confirms absolute paths still work
+- **test_chdir_error_type** - Validates proper `io::Error` type on failure
+- **test_chdir_concurrent_forks** - Tests with multiple concurrent child processes
+- **test_chdir_before_and_after_setsid** - Integration with setsid (daemon pattern)
+- **test_chdir_uses_c_string_literal** - Validates modern `c""` literal implementation (calls chdir 100 times)
+- **test_chdir_with_env_manipulation** - Tests with modified environment variables
+
 ## Running Tests
 
 ```bash
@@ -170,6 +189,7 @@ cargo test --tests
 cargo test --test daemon_tests
 cargo test --test fork_tests
 cargo test --test integration_tests
+cargo test --test chdir_tests
 
 # Run specific test
 cargo test --test daemon_tests test_daemon_creates_detached_process
@@ -264,7 +284,10 @@ tests/
 ├── fork_tests.rs            # Fork tests (301 lines, 7 tests)
 ├── integration_tests.rs     # Advanced tests (284 lines, 7 tests)
 ├── stdio_redirect_tests.rs  # Stdio safety tests (313 lines, 7 tests)
-├── waitpid_tests.rs         # Waitpid tests (591 lines, 19 tests)
+├── waitpid_tests.rs         # Waitpid tests (591 lines, 20 tests)
 ├── error_handling_tests.rs  # Error tests (260 lines, 9 tests)
+├── pid_tests.rs             # PID helper tests (252 lines, 10 tests)
+├── status_macro_tests.rs    # Status macro tests (211 lines, 8 tests)
+├── chdir_tests.rs           # chdir tests (346 lines, 12 tests)
 └── README.md                # This file
 ```

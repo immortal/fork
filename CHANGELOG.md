@@ -37,6 +37,19 @@
 * **EINTR resilience** - `close_fd` and `redirect_stdio` now retry on `EINTR` for `close/open/dup2`, preventing spurious failures under signal-heavy conditions on Linux, macOS, and BSD
 * **Daemon exit safety** - Replaced `std::process::exit` in post-fork parents with `libc::_exit` to avoid running non-async-signal-safe destructors, preventing undefined behavior between `fork()` and `exec()`
 
+### Code Quality
+* **Modernized C string handling** - Replaced runtime `CString::new()` allocations with compile-time `c""` string literals (Rust 2024 feature)
+  - `chdir()` now uses `c"/"` instead of `CString::new("/")`
+  - `redirect_stdio()` now uses `c"/dev/null"` instead of `CString::new("/dev/null")`
+  - Benefits: Eliminated dead error handling code, zero runtime overhead, compile-time validation
+  - No API changes, fully backward compatible
+* **Enhanced code clarity** - Added clarifying comments to `redirect_stdio()` error handling logic explaining conditional cleanup of file descriptors
+* **Comprehensive test coverage** - Added 12 dedicated tests for `chdir()` function (346 lines)
+  - Tests idempotent behavior, process isolation, concurrent usage
+  - Validates modern `c""` string literal implementation
+  - Tests integration with `setsid()` (daemon pattern)
+  - Total test count increased from 107 to 119 tests
+
 ## 0.5.0
 
 ### Breaking Changes
