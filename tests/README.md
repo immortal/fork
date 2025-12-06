@@ -71,6 +71,7 @@ Tests include:
 - **test_redirect_stdio_error_handling** - Propagates errors from failed redirection
 - **test_fd_reuse_corruption_scenario** - Demonstrates corruption risk when closing stdio
 - **test_close_fd_allows_fd_reuse** - Shows fd reuse when stdio is closed (expected panic)
+- **test_close_retry_ok_and_ebadf** - Unit-level check that repeated closes handle EINTR/EBADF gracefully
 
 ### `waitpid_tests.rs` - Waitpid Comprehensive Tests
 

@@ -184,6 +184,12 @@ The `daemon()` function implements the classic double-fork pattern:
 
 This prevents the daemon from ever acquiring a controlling terminal.
 
+## Safety Notes
+
+- `daemon()` uses `_exit` in the forked parents to avoid running non-async-signal-safe destructors between fork/exec (POSIX-safe on Linux/macOS/BSD).
+- `redirect_stdio()` and `close_fd()` retry on `EINTR` for `open/dup2/close` to prevent spurious failures under signal-heavy workloads.
+- Prefer `redirect_stdio()` over `close_fd()` so file descriptors 0,1,2 stay occupied (avoids accidental log/data corruption).
+
 ## Testing
 
 Run tests:

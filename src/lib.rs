@@ -148,6 +148,29 @@ pub enum Fork {
     Child,
 }
 
+/// Close a file descriptor, retrying on `EINTR` and treating `EBADF` as success.
+#[inline]
+fn close_retry(fd: libc::c_int) -> io::Result<()> {
+    loop {
+        let res = unsafe { libc::close(fd) };
+        if res == 0 {
+            return Ok(());
+        }
+
+        let err = io::Error::last_os_error();
+
+        if err.kind() == io::ErrorKind::Interrupted {
+            continue;
+        }
+
+        if err.raw_os_error() == Some(libc::EBADF) {
+            return Ok(());
+        }
+
+        return Err(err);
+    }
+}
+
 impl Fork {
     /// Returns `true` if this is the parent process
     ///
@@ -291,19 +314,7 @@ pub fn chdir() -> io::Result<()> {
 /// ```
 pub fn close_fd() -> io::Result<()> {
     for fd in 0..=2 {
-        if unsafe { libc::close(fd) } == -1 {
-            let err = io::Error::last_os_error();
-
-            // Check if the error is EBADF (Bad file descriptor),
-            // which indicates the FD was already closed. This is non-fatal.
-            if err.raw_os_error() == Some(libc::EBADF) {
-                continue; // already closed; treat as success for idempotency
-            }
-
-            // For any other error (EIO, EINTR, etc.), return the error.
-            // Note: EINTR is not typically returned by close(), but we handle others.
-            return Err(err);
-        }
+        close_retry(fd)?;
     }
 
     Ok(())
@@ -355,28 +366,39 @@ pub fn redirect_stdio() -> io::Result<()> {
     let dev_null = CString::new("/dev/null")
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "CString::new failed"))?;
 
-    let null_fd = unsafe { libc::open(dev_null.as_ptr(), libc::O_RDWR) };
-
-    if null_fd == -1 {
-        return Err(io::Error::last_os_error());
-    }
+    let null_fd = loop {
+        let fd = unsafe { libc::open(dev_null.as_ptr(), libc::O_RDWR) };
+        if fd == -1 {
+            let err = io::Error::last_os_error();
+            if err.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(err);
+        }
+        break fd;
+    };
 
     // Redirect stdin, stdout, stderr to /dev/null
     for fd in 0..=2 {
-        if unsafe { libc::dup2(null_fd, fd) } == -1 {
-            let err = io::Error::last_os_error();
-            // Clean up the opened fd before returning error
-            if null_fd > 2 {
-                unsafe { libc::close(null_fd) };
+        loop {
+            if unsafe { libc::dup2(null_fd, fd) } == -1 {
+                let err = io::Error::last_os_error();
+                if err.kind() == io::ErrorKind::Interrupted {
+                    continue;
+                }
+                if null_fd > 2 {
+                    let _ = close_retry(null_fd);
+                }
+                return Err(err);
             }
-            return Err(err);
+            break;
         }
     }
 
     // Close the extra fd if it's > 2
     // (if null_fd was 0, 1, or 2, it's now dup'd to all three, so don't close)
     if null_fd > 2 {
-        unsafe { libc::close(null_fd) };
+        close_retry(null_fd)?;
     }
 
     Ok(())
@@ -773,8 +795,11 @@ pub fn daemon(nochdir: bool, noclose: bool) -> io::Result<Fork> {
 mod tests {
     use super::*;
     use libc::{WEXITSTATUS, WIFEXITED};
-    use std::env;
-    use std::process::{Command, exit};
+    use std::{
+        env,
+        os::unix::io::FromRawFd,
+        process::{Command, exit},
+    };
 
     #[test]
     fn test_fork() {
@@ -1101,5 +1126,22 @@ mod tests {
         // Test getpgrp in parent process
         let parent_pgrp = getpgrp();
         assert!(parent_pgrp > 0);
+    }
+
+    #[test]
+    fn test_close_retry_ok_and_ebadf() {
+        // Create a pipe to obtain valid fds
+        let mut fds = [0; 2];
+        assert_eq!(unsafe { libc::pipe(&raw mut fds[0]) }, 0);
+
+        // Close write end via close_retry (should succeed)
+        close_retry(fds[1]).expect("close_retry should close valid fd");
+
+        // Wrap read end in File to close it once; drop immediately
+        let read_fd = fds[0];
+        unsafe { std::fs::File::from_raw_fd(read_fd) };
+
+        // Second close should be treated as success (EBADF path)
+        close_retry(read_fd).expect("EBADF should be treated as success");
     }
 }
