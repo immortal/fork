@@ -3,7 +3,7 @@
 [![Crates.io](https://img.shields.io/crates/v/fork.svg)](https://crates.io/crates/fork)
 [![Documentation](https://docs.rs/fork/badge.svg)](https://docs.rs/fork)
 [![Build](https://github.com/immortal/fork/actions/workflows/build.yml/badge.svg)](https://github.com/immortal/fork/actions/workflows/build.yml)
-[![codecov](https://codecov.io/gh/immortal/fork/graph/badge.svg?token=LHZW56OC10)](https://codecov.io/gh/immortal/fork)
+[![Coverage Status](https://coveralls.io/repos/github/immortal/fork/badge.svg?branch=main)](https://coveralls.io/github/immortal/fork?branch=main)
 [![License](https://img.shields.io/crates/l/fork.svg)](https://github.com/immortal/fork/blob/main/LICENSE)
 
 Library for creating a new process detached from the controlling terminal (daemon) on Unix-like systems.
