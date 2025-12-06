@@ -1,6 +1,7 @@
 //! Library for creating a new process detached from the controlling terminal (daemon).
 //!
-//! Example:
+//! # Quick Start
+//!
 //! ```
 //! use fork::{daemon, Fork};
 //! use std::process::Command;
@@ -12,6 +13,126 @@
 //!         .expect("failed to execute process");
 //! }
 //! ```
+//!
+//! # Common Patterns
+//!
+//! ## Process Supervisor
+//!
+//! Track multiple worker processes:
+//!
+//! ```no_run
+//! use fork::{fork, Fork, waitpid_nohang, WIFEXITED};
+//! use std::collections::HashMap;
+//!
+//! # fn main() -> std::io::Result<()> {
+//! let mut workers = HashMap::new();
+//!
+//! // Spawn 3 workers
+//! for i in 0..3 {
+//!     match fork()? {
+//!         result @ Fork::Parent(_) => {
+//!             workers.insert(result, format!("worker-{}", i));
+//!         }
+//!         Fork::Child => {
+//!             // Do work...
+//!             std::thread::sleep(std::time::Duration::from_secs(5));
+//!             std::process::exit(0);
+//!         }
+//!     }
+//! }
+//!
+//! // Monitor workers without blocking
+//! while !workers.is_empty() {
+//!     workers.retain(|child, name| {
+//!         match waitpid_nohang(child.child_pid().unwrap()) {
+//!             Ok(Some(status)) if WIFEXITED(status) => {
+//!                 println!("{} exited", name);
+//!                 false  // Remove from map
+//!             }
+//!             _ => true  // Keep in map
+//!         }
+//!     });
+//!     std::thread::sleep(std::time::Duration::from_millis(100));
+//! }
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! ## Inter-Process Communication (IPC) via Pipe
+//!
+//! ```no_run
+//! use fork::{fork, Fork};
+//! use std::io::{Read, Write};
+//! use std::os::unix::io::FromRawFd;
+//!
+//! # fn main() -> std::io::Result<()> {
+//! // Create pipe before forking
+//! let mut pipe_fds = [0i32; 2];
+//! unsafe { libc::pipe(pipe_fds.as_mut_ptr()) };
+//!
+//! match fork()? {
+//!     Fork::Parent(_child) => {
+//!         unsafe { libc::close(pipe_fds[1]) };  // Close write end
+//!
+//!         let mut reader = unsafe { std::fs::File::from_raw_fd(pipe_fds[0]) };
+//!         let mut msg = String::new();
+//!         reader.read_to_string(&mut msg)?;
+//!         println!("Received: {}", msg);
+//!     }
+//!     Fork::Child => {
+//!         unsafe { libc::close(pipe_fds[0]) };  // Close read end
+//!
+//!         let mut writer = unsafe { std::fs::File::from_raw_fd(pipe_fds[1]) };
+//!         writer.write_all(b"Hello from child!")?;
+//!         std::process::exit(0);
+//!     }
+//! }
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! ## Daemon with PID File
+//!
+//! ```no_run
+//! use fork::{daemon, Fork, getpid};
+//! use std::fs::File;
+//! use std::io::Write;
+//!
+//! # fn main() -> std::io::Result<()> {
+//! if let Ok(Fork::Child) = daemon(false, false) {
+//!     // Write PID file
+//!     let pid = getpid();
+//!     let mut file = File::create("/var/run/myapp.pid")?;
+//!     writeln!(file, "{}", pid)?;
+//!
+//!     // Run daemon logic...
+//!     loop {
+//!         // Do work
+//!         std::thread::sleep(std::time::Duration::from_secs(60));
+//!     }
+//! }
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! # Safety and Best Practices
+//!
+//! - **Always check fork result** - Functions marked `#[must_use]` prevent accidents
+//! - **Use `waitpid()`** - Reap child processes to avoid zombies
+//! - **Prefer `redirect_stdio()`** - Safer than `close_fd()` for daemons
+//! - **Fork early** - Before creating threads, locks, or complex state
+//! - **Close unused file descriptors** - Prevent resource leaks in children
+//! - **Handle signals properly** - Consider what happens in both processes
+//!
+//! # Platform Compatibility
+//!
+//! This library uses POSIX system calls and is designed for Unix-like systems:
+//! - Linux (all distributions)
+//! - macOS (10.5+, replacement for deprecated `daemon(3)`)
+//! - FreeBSD, OpenBSD, NetBSD
+//! - Other POSIX-compliant systems
+//!
+//! Windows is **not supported** as it lacks `fork()` system call.
 
 use std::{ffi::CString, io, process::exit};
 
@@ -513,35 +634,24 @@ pub fn setsid() -> io::Result<libc::pid_t> {
     }
 }
 
-/// The process group of the current process [see getpgrp(2)](https://www.freebsd.org/cgi/man.cgi?query=getpgrp)
+/// Get the process group ID of the current process [see getpgrp(2)](https://www.freebsd.org/cgi/man.cgi?query=getpgrp)
 ///
-/// # Errors
-/// This function should not fail under normal circumstances, but returns
-/// an [`io::Error`] if the system call fails.
+/// Returns the process group ID of the calling process. This function is always successful
+/// and cannot fail according to POSIX specification.
 ///
 /// # Example
 ///
 /// ```
 /// use fork::getpgrp;
 ///
-/// match getpgrp() {
-///     Ok(pgid) => {
-///         println!("Current process group ID: {}", pgid);
-///     }
-///     Err(e) => {
-///         eprintln!("Failed to get process group: {}", e);
-///     }
-/// }
+/// let pgid = getpgrp();
+/// println!("Current process group ID: {}", pgid);
 /// ```
 #[inline]
 #[must_use = "process group ID should be used"]
-pub fn getpgrp() -> io::Result<libc::pid_t> {
-    let res = unsafe { libc::getpgrp() };
-
-    match res {
-        -1 => Err(io::Error::last_os_error()),
-        res => Ok(res),
-    }
+pub fn getpgrp() -> libc::pid_t {
+    // SAFETY: getpgrp() has no preconditions and always succeeds per POSIX
+    unsafe { libc::getpgrp() }
 }
 
 /// Get the current process ID [see getpid(2)](https://man.freebsd.org/cgi/man.cgi?getpid)
@@ -729,13 +839,9 @@ mod tests {
             }
             Ok(Fork::Child) => {
                 // Get process group and verify it's valid
-                match getpgrp() {
-                    Ok(pgrp) => {
-                        assert!(pgrp > 0);
-                        exit(0);
-                    }
-                    Err(_) => exit(1),
-                }
+                let pgrp = getpgrp();
+                assert!(pgrp > 0);
+                exit(0);
             }
             Err(_) => panic!("Fork failed"),
         }
@@ -754,7 +860,7 @@ mod tests {
                     Ok(sid) => {
                         assert!(sid > 0);
                         // Verify we're the session leader
-                        let pgrp = getpgrp().expect("Failed to get process group");
+                        let pgrp = getpgrp();
                         assert_eq!(sid, pgrp);
                         exit(0);
                     }
@@ -790,7 +896,7 @@ mod tests {
                         let path = env::current_dir().expect("failed current_dir");
                         assert_eq!(Some("/"), path.to_str());
 
-                        let pgrp = getpgrp().expect("Failed to get process group");
+                        let pgrp = getpgrp();
                         assert!(pgrp > 0);
 
                         exit(0);
@@ -917,7 +1023,7 @@ mod tests {
                     }
                     Ok(Fork::Child) => {
                         // Grandchild - the daemon process
-                        let pgrp = getpgrp().expect("Failed to get process group");
+                        let pgrp = getpgrp();
                         assert!(pgrp > 0);
                         exit(0);
                     }
@@ -991,7 +1097,7 @@ mod tests {
     #[test]
     fn test_getpgrp_in_parent() {
         // Test getpgrp in parent process
-        let parent_pgrp = getpgrp().expect("getpgrp should succeed");
+        let parent_pgrp = getpgrp();
         assert!(parent_pgrp > 0);
     }
 }

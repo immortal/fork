@@ -36,7 +36,7 @@ fn test_setsid_error_when_already_session_leader() {
 
             // Verify we're a session leader (PID == PGID)
             let pid = unsafe { libc::getpid() };
-            let pgid = getpgrp().expect("getpgrp failed");
+            let pgid = getpgrp();
             assert_eq!(pid, pgid, "Should be session leader");
 
             // Second setsid should fail with EPERM
@@ -133,18 +133,16 @@ fn test_setsid_returns_io_error_type() {
 }
 
 #[test]
-fn test_getpgrp_returns_io_error_type() {
-    // Tests that getpgrp returns proper io::Result type
-    // (getpgrp shouldn't fail normally, but verify type)
+fn test_getpgrp_returns_pid_type() {
+    // Tests that getpgrp returns pid_t directly (not Result)
+    // getpgrp() always succeeds per POSIX and cannot fail
     match fork() {
         Ok(Fork::Parent(child)) => {
             waitpid(child).expect("waitpid failed");
         }
         Ok(Fork::Child) => {
-            let result: std::io::Result<libc::pid_t> = getpgrp();
-            assert!(result.is_ok(), "getpgrp should succeed");
-
-            let pgid = result.unwrap();
+            // getpgrp() always succeeds and returns pid_t directly (not Result)
+            let pgid: libc::pid_t = getpgrp();
             assert!(pgid > 0, "PGID should be positive");
 
             exit(0);

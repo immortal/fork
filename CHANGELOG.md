@@ -1,3 +1,40 @@
+## 0.6.0
+
+### Breaking Changes
+* **`getpgrp()` signature changed** - Now returns `libc::pid_t` directly instead of `io::Result<libc::pid_t>`
+  - `getpgrp()` always succeeds per POSIX specification and cannot fail
+  - **Migration guide:**
+    - Change `getpgrp()?` to `getpgrp()`
+    - Change `getpgrp().expect("...")` to `getpgrp()`
+    - Change `match getpgrp() { Ok(pgid) => ... }` to `let pgid = getpgrp();`
+  - Rationale: Aligns with POSIX.1 specification and matches `getpid()`/`getppid()` patterns
+  - Verified on Linux, macOS, FreeBSD, OpenBSD per POSIX.1 specification
+  - Updated all tests and documentation to reflect this guarantee
+
+### Improved
+* **Enhanced documentation** - Comprehensive improvements to library documentation
+  - Added "Common Patterns" section with practical examples:
+    - Process supervisor using HashMap with Fork
+    - Inter-process communication via pipes
+    - Daemon with PID file creation
+  - Added "Safety and Best Practices" guidelines
+  - Added detailed "Common Pitfalls and Safety Considerations" to `fork()`:
+    - Mutexes and locks (deadlock risks)
+    - File descriptors (shared state issues)
+    - Signal handlers (inheritance behavior)
+    - Async-signal-safety between fork and exec
+    - Memory usage (copy-on-write behavior)
+  - Enhanced `Fork` enum documentation with helper method examples
+  - Added "Platform Compatibility" information
+* **Test quality improvements**
+  - Replaced deprecated `signal()` with `sigaction()` in EINTR tests
+  - More portable signal handling for cross-platform compatibility
+  - Renamed `test_getpgrp_returns_io_error_type` to `test_getpgrp_returns_pid_type`
+  - Updated test README to reflect current test descriptions
+
+### Fixed
+* **Documentation warnings** - Resolved doctest warnings about main function wrapping
+
 ## 0.5.0
 
 ### Breaking Changes

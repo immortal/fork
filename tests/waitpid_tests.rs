@@ -320,8 +320,22 @@ fn test_waitpid_retries_on_eintr() {
     SIGNAL_RECEIVED.store(false, Ordering::SeqCst);
 
     // Install a minimal handler so SIGUSR1 interrupts waitpid
+    // Use sigaction() instead of deprecated signal() for portability
     unsafe {
-        libc::signal(libc::SIGUSR1, handle_sigusr1 as usize);
+        let mut sa: libc::sigaction = std::mem::zeroed();
+
+        // Set the handler function
+        sa.sa_sigaction = handle_sigusr1 as usize;
+
+        // SA_RESTART would make interrupted syscalls restart automatically,
+        // but we want to test EINTR handling, so we don't set it
+        sa.sa_flags = 0;
+
+        // Install the signal handler
+        assert!(
+            libc::sigaction(libc::SIGUSR1, &raw const sa, std::ptr::null_mut()) != -1,
+            "Failed to install signal handler"
+        );
     }
 
     match fork() {

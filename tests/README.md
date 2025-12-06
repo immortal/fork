@@ -108,7 +108,7 @@ Tests include:
 - **test_setsid_returns_io_error_type** - io::Error type and EPERM verification
 - **test_fork_returns_io_error_type** - io::Result<Fork> type verification
 - **test_waitpid_returns_io_error_type** - io::Result<c_int> type verification
-- **test_getpgrp_returns_io_error_type** - io::Result<pid_t> type verification
+- **test_getpgrp_returns_pid_type** - pid_t type verification (getpgrp always succeeds per POSIX)
 - **test_close_fd_error_handling** - close_fd error scenarios
 - **test_error_kind_matching** - io::ErrorKind pattern matching
 - **test_fork_child_pid_method** - Fork::child_pid() correctness

@@ -71,7 +71,7 @@ fn test_double_fork_daemon_pattern() {
                 Fork::Child => {
                     // This is the daemon process
                     let pid = getpid();
-                    let pgid = getpgrp().expect("getpgrp failed");
+                    let pgid = getpgrp();
 
                     // Write PID to file
                     fs::write(&daemon_pid_file, format!("{}", pid))
@@ -121,7 +121,7 @@ fn test_setsid_creates_new_session() {
             // Create new session
             let sid = setsid().expect("setsid failed");
             let pid = unsafe { libc::getpid() };
-            let pgid = getpgrp().expect("getpgrp failed");
+            let pgid = getpgrp();
 
             fs::write(&session_file, format!("{},{},{}", sid, pid, pgid))
                 .expect("Failed to write session info");
@@ -222,13 +222,13 @@ fn test_process_isolation() {
 fn test_getpgrp_returns_process_group() {
     match fork().expect("Fork failed") {
         Fork::Parent(_child) => {
-            let parent_pgid = getpgrp().expect("getpgrp failed");
+            let parent_pgid = getpgrp();
             assert!(parent_pgid > 0, "Parent PGID should be positive");
 
             thread::sleep(Duration::from_millis(50));
         }
         Fork::Child => {
-            let child_pgid = getpgrp().expect("getpgrp failed");
+            let child_pgid = getpgrp();
             assert!(child_pgid > 0, "Child PGID should be positive");
 
             exit(0);
