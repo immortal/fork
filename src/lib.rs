@@ -148,27 +148,28 @@ pub enum Fork {
     Child,
 }
 
-/// Close a file descriptor, retrying on `EINTR` and treating `EBADF` as success.
+/// Close a file descriptor without retrying on `EINTR`, treating `EBADF` as success.
+///
+/// On Linux, `close()` always releases the fd before returning `EINTR`, so retrying
+/// would risk closing an unrelated fd opened by another thread. On FreeBSD, macOS,
+/// and other Unixes the fd state after `EINTR` is unspecified (POSIX 2008+, Austin
+/// Group defect 529), making retry equally unsafe. The safe portable behavior is to
+/// call `close()` exactly once and treat `EINTR` as success — the same approach used
+/// by Rust's stdlib, Go's runtime, and glibc internals.
 #[inline]
-fn close_retry(fd: libc::c_int) -> io::Result<()> {
-    loop {
-        let res = unsafe { libc::close(fd) };
-        if res == 0 {
-            return Ok(());
-        }
-
-        let err = io::Error::last_os_error();
-
-        if err.kind() == io::ErrorKind::Interrupted {
-            continue;
-        }
-
-        if err.raw_os_error() == Some(libc::EBADF) {
-            return Ok(());
-        }
-
-        return Err(err);
+fn close_once(fd: libc::c_int) -> io::Result<()> {
+    let res = unsafe { libc::close(fd) };
+    if res == 0 {
+        return Ok(());
     }
+
+    let err = io::Error::last_os_error();
+
+    if err.kind() == io::ErrorKind::Interrupted || err.raw_os_error() == Some(libc::EBADF) {
+        return Ok(());
+    }
+
+    Err(err)
 }
 
 impl Fork {
@@ -307,7 +308,7 @@ pub fn chdir() -> io::Result<()> {
 /// ```
 pub fn close_fd() -> io::Result<()> {
     for fd in 0..=2 {
-        close_retry(fd)?;
+        close_once(fd)?;
     }
 
     Ok(())
@@ -377,7 +378,7 @@ pub fn redirect_stdio() -> io::Result<()> {
                 // Only close null_fd if it's > 2 (not one of the stdio fds we're duplicating to)
                 // If null_fd was 0, 1, or 2, we're in the process of duping it, so don't close
                 if null_fd > 2 {
-                    let _ = close_retry(null_fd);
+                    let _ = close_once(null_fd);
                 }
                 return Err(err);
             }
@@ -388,7 +389,7 @@ pub fn redirect_stdio() -> io::Result<()> {
     // Close the extra fd if it's > 2
     // (if null_fd was 0, 1, or 2, it's now dup'd to all three, so don't close)
     if null_fd > 2 {
-        close_retry(null_fd)?;
+        close_once(null_fd)?;
     }
 
     Ok(())
@@ -710,12 +711,51 @@ pub fn getppid() -> libc::pid_t {
 /// * `nochdir = false`, changes the current working directory to the root (`/`).
 /// * `noclose = false`, redirects stdin, stdout, and stderr to `/dev/null`
 ///
+/// # Return Value
+///
+/// This function only ever returns in the **daemon (grandchild) process**:
+///
+/// - `Ok(Fork::Child)` — You are the daemon. The original process and the
+///   intermediate child have already exited via `_exit(0)`.
+/// - `Err(...)` — A system call failed before the daemon could be created.
+///
+/// **`Ok(Fork::Parent(_))` is never returned** because both parent processes
+/// call `_exit(0)` internally. You do not need to match on it:
+///
+/// ```no_run
+/// use fork::{daemon, Fork};
+///
+/// // Recommended: use `if let` — no dead Parent arm needed
+/// if let Ok(Fork::Child) = daemon(false, false) {
+///     // Only the daemon reaches here
+///     loop {
+///         // daemon work…
+///         std::thread::sleep(std::time::Duration::from_secs(60));
+///     }
+/// }
+/// ```
+///
+/// If you prefer `match` for explicit error handling, mark the parent arm
+/// unreachable:
+///
+/// ```no_run
+/// use fork::{daemon, Fork};
+///
+/// match daemon(false, false) {
+///     Ok(Fork::Child) => {
+///         // daemon work…
+///     }
+///     Ok(Fork::Parent(_)) => unreachable!("daemon() exits both parent processes"),
+///     Err(err) => eprintln!("daemon failed: {err}"),
+/// }
+/// ```
+///
 /// # Implementation (double-fork)
 ///
-/// 1. **First fork** - Parent exits immediately.
-/// 2. **Session setup** - Child calls `setsid()`, optionally `chdir("/")`, and optionally redirects stdio.
-/// 3. **Second (double) fork** - Session-leader child exits immediately.
-/// 4. **Daemon continues** - Grandchild (daemon) runs with no controlling terminal.
+/// 1. **First fork** — Parent calls `_exit(0)` immediately.
+/// 2. **Session setup** — Child calls `setsid()`, optionally `chdir("/")`, and optionally redirects stdio.
+/// 3. **Second (double) fork** — Session-leader child calls `_exit(0)` immediately.
+/// 4. **Daemon continues** — Grandchild (daemon) runs with no controlling terminal.
 ///
 /// # Behavior Change in v0.4.0
 ///
@@ -750,7 +790,7 @@ pub fn getppid() -> libc::pid_t {
 ///        .expect("failed to execute process");
 ///}
 ///```
-#[must_use = "daemon result must be checked to determine if this is the daemon process"]
+#[must_use = "daemon() only returns Ok(Fork::Child) in the daemon process; check the result"]
 pub fn daemon(nochdir: bool, noclose: bool) -> io::Result<Fork> {
     // 1. First fork: detach from original parent; parent exits immediately
     match fork()? {
@@ -1119,19 +1159,19 @@ mod tests {
     }
 
     #[test]
-    fn test_close_retry_ok_and_ebadf() {
+    fn test_close_once_ok_and_ebadf() {
         // Create a pipe to obtain valid fds
         let mut fds = [0; 2];
         assert_eq!(unsafe { libc::pipe(&raw mut fds[0]) }, 0);
 
-        // Close write end via close_retry (should succeed)
-        close_retry(fds[1]).expect("close_retry should close valid fd");
+        // Close write end via close_once (should succeed)
+        close_once(fds[1]).expect("close_once should close valid fd");
 
         // Wrap read end in File to close it once; drop immediately
         let read_fd = fds[0];
         unsafe { std::fs::File::from_raw_fd(read_fd) };
 
         // Second close should be treated as success (EBADF path)
-        close_retry(read_fd).expect("EBADF should be treated as success");
+        close_once(read_fd).expect("EBADF should be treated as success");
     }
 }

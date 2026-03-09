@@ -225,10 +225,10 @@ fn test_daemon_with_command_execution() {
 fn test_daemon_no_controlling_terminal() {
     // Tests that daemon has no controlling terminal
     // Expected behavior:
-    // 1. Daemon process is created
-    // 2. Daemon calls 'tty' command to check for terminal
-    // 3. tty command should return "not a tty" or similar error
-    // 4. This confirms daemon is properly detached from terminal
+    // 1. Daemon process is created via double-fork + setsid()
+    // 2. Daemon tries to open /dev/tty (the POSIX controlling terminal device)
+    // 3. open() should fail because the daemon has no controlling terminal
+    // 4. This confirms daemon is properly detached
     // 5. Critical for background service behavior
     let test_dir = setup_test_dir(get_unique_test_dir("daemon_no_tty"));
     let tty_file = test_dir.join("tty.info");
@@ -238,9 +238,9 @@ fn test_daemon_no_controlling_terminal() {
             assert!(wait_for_file(&tty_file, 500), "TTY info file should exist");
 
             let content = fs::read_to_string(&tty_file).expect("Failed to read tty file");
-            // When daemon has no controlling terminal, tty command should fail or return "not a tty"
-            assert!(
-                content.contains("not a tty") || content.contains("No such"),
+            assert_eq!(
+                content.trim(),
+                "no_ctty",
                 "Daemon should have no controlling terminal, got: {}",
                 content
             );
@@ -250,20 +250,68 @@ fn test_daemon_no_controlling_terminal() {
         }
         Fork::Child => {
             if let Ok(Fork::Child) = daemon(false, true) {
-                // Check if we have a controlling terminal
-                let output = Command::new("tty")
-                    .output()
-                    .expect("Failed to run tty command");
-
-                let tty_output = if output.stdout.is_empty() {
-                    String::from_utf8_lossy(&output.stderr).to_string()
+                // The POSIX way to check for a controlling terminal:
+                // opening /dev/tty fails when the process has none.
+                let fd =
+                    unsafe { libc::open(c"/dev/tty".as_ptr(), libc::O_RDONLY | libc::O_NOCTTY) };
+                let result = if fd == -1 {
+                    "no_ctty"
                 } else {
-                    String::from_utf8_lossy(&output.stdout).to_string()
+                    unsafe { libc::close(fd) };
+                    "has_ctty"
                 };
 
-                fs::write(&tty_file, tty_output).expect("Failed to write tty file");
-
+                fs::write(&tty_file, result).expect("Failed to write tty file");
                 exit(0);
+            }
+        }
+    }
+}
+
+#[test]
+fn test_daemon_never_returns_parent() {
+    // Tests that daemon() never returns Ok(Fork::Parent(_))
+    // Expected behavior:
+    // 1. daemon() performs double-fork internally
+    // 2. Both parent processes call _exit(0) and never return
+    // 3. Only Ok(Fork::Child) is ever returned to the caller
+    // 4. The daemon writes "child" to a marker file to confirm
+    // 5. If Fork::Parent were ever returned, "parent" would be written instead
+    let test_dir = setup_test_dir(get_unique_test_dir("daemon_never_returns_parent"));
+    let marker_file = test_dir.join("result.marker");
+
+    match fork().expect("Failed to fork") {
+        Fork::Parent(_) => {
+            assert!(
+                wait_for_file(&marker_file, 500),
+                "Result marker file should exist"
+            );
+
+            let content = fs::read_to_string(&marker_file).expect("Failed to read marker file");
+            assert_eq!(
+                content.trim(),
+                "child",
+                "daemon() should only return Fork::Child, never Fork::Parent"
+            );
+
+            // Cleanup
+            let _ = fs::remove_dir_all(&test_dir);
+        }
+        Fork::Child => {
+            match daemon(false, true) {
+                Ok(Fork::Child) => {
+                    fs::write(&marker_file, "child").expect("Failed to write marker");
+                    exit(0);
+                }
+                Ok(Fork::Parent(_)) => {
+                    // This arm should be unreachable
+                    fs::write(&marker_file, "parent").expect("Failed to write marker");
+                    exit(1);
+                }
+                Err(_) => {
+                    fs::write(&marker_file, "error").expect("Failed to write marker");
+                    exit(2);
+                }
             }
         }
     }

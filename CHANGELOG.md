@@ -1,3 +1,34 @@
+## 0.7.0
+
+### Fixed
+* **`close()` no longer retries on `EINTR`** — Previously, the internal `close_retry` helper
+  looped on `EINTR`, which is unsafe on all modern Unixes:
+  - **Linux**: `close()` always releases the fd *before* returning `EINTR`.
+    Retrying can close an unrelated fd opened by another thread between attempts.
+  - **FreeBSD / macOS / other BSDs**: The fd state after `close()` + `EINTR` is
+    *unspecified* per POSIX 2008+ (Austin Group defect 529), so retrying is equally dangerous.
+  - The function has been renamed from `close_retry` to `close_once` and now calls `close()`
+    exactly once, treating both `EINTR` and `EBADF` as success — the same approach used by
+    Rust's `std::fs::File::drop()`, Go's runtime, and glibc internals.
+  - **Note**: `open()` and `dup2()` in `redirect_stdio()` still correctly retry on `EINTR`,
+    as those calls do *not* release resources on interruption.
+
+### Improved
+* **`daemon()` return value documentation** — Made it prominent that `daemon()` only ever
+  returns `Ok(Fork::Child)` or `Err(...)` to the caller; `Ok(Fork::Parent(_))` is never
+  returned because both parent processes call `_exit(0)` internally. Added recommended
+  `if let` and `match` usage patterns to the doc comment. Updated `#[must_use]` message
+  to reflect this guarantee.
+
+### Code Quality
+* Added `test_daemon_never_returns_parent` integration test confirming `Fork::Parent` is unreachable
+* Renamed `test_close_retry_ok_and_ebadf` to `test_close_once_ok_and_ebadf`
+* Replaced fragile `tty` command string-matching in `test_daemon_no_controlling_terminal` with
+  portable `open("/dev/tty")` check (works reliably across Linux, macOS, and BSDs)
+* Replaced fixed 100ms sleep in `test_getppid_after_parent_exits` with a retry loop (up to 1s),
+  preventing flaky failures on slow CI systems
+* Updated tests README to reflect new and renamed tests
+
 ## 0.6.0
 
 ### Breaking Changes

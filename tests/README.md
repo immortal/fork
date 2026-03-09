@@ -33,6 +33,7 @@ Tests include:
 - **test_daemon_process_group** - Verifies daemon process group structure (double-fork pattern)
 - **test_daemon_with_command_execution** - Tests command execution in daemon context
 - **test_daemon_no_controlling_terminal** - Verifies daemon has no controlling terminal
+- **test_daemon_never_returns_parent** - Verifies daemon() only returns `Fork::Child`, never `Fork::Parent`
 
 ### `fork_tests.rs` - Fork Functionality Tests
 
@@ -72,7 +73,7 @@ Tests include:
 - **test_redirect_stdio_error_handling** - Propagates errors from failed redirection
 - **test_fd_reuse_corruption_scenario** - Demonstrates corruption risk when closing stdio
 - **test_close_fd_allows_fd_reuse** - Shows fd reuse when stdio is closed (expected panic)
-- **test_close_retry_ok_and_ebadf** - Unit-level check that repeated closes handle EINTR/EBADF gracefully
+- **test_close_once_ok_and_ebadf** - Unit-level check that close handles EBADF gracefully
 
 ### `waitpid_tests.rs` - Waitpid Comprehensive Tests
 
@@ -280,7 +281,7 @@ Integration tests provide coverage for:
 tests/
 ├── common/
 │   └── mod.rs               # Shared utilities (51 lines)
-├── daemon_tests.rs          # Daemon tests (271 lines, 5 tests)
+├── daemon_tests.rs          # Daemon tests (271 lines, 6 tests)
 ├── fork_tests.rs            # Fork tests (301 lines, 7 tests)
 ├── integration_tests.rs     # Advanced tests (284 lines, 7 tests)
 ├── stdio_redirect_tests.rs  # Stdio safety tests (313 lines, 7 tests)

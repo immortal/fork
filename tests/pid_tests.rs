@@ -270,14 +270,20 @@ fn test_getppid_after_parent_exits() {
                     exit(0);
                 }
                 Ok(Fork::Child) => {
-                    // Give parent time to exit
-                    std::thread::sleep(std::time::Duration::from_millis(100));
+                    // Poll until reparented to init (PID 1) with a timeout
+                    let mut reparented = false;
+                    for _ in 0..50 {
+                        if getppid() == 1 {
+                            reparented = true;
+                            break;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                    }
 
-                    // Grandchild's parent should now be init (PID 1)
-                    let current_parent = getppid();
-                    assert_eq!(
-                        current_parent, 1,
-                        "Orphaned grandchild should be reparented to init (PID 1)"
+                    assert!(
+                        reparented,
+                        "Orphaned grandchild should be reparented to init (PID 1), got ppid={}",
+                        getppid()
                     );
 
                     // Verify we're not the original child
