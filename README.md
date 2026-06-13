@@ -30,7 +30,7 @@ Add `fork` to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-fork = "0.7.0"
+fork = "0.8.0"
 ```
 
 Or use cargo-add:
@@ -119,6 +119,8 @@ match fork() {
 - **`setsid()`** - Creates a new session and sets the process group ID
 - **`waitpid(pid)`** - Waits for child process to change state (blocking; returns raw status; retries on signals)
 - **`waitpid_nohang(pid)`** - Checks child status without blocking (returns `Option<status>`; for supervisors/polling)
+- **`wait_any()`** - Waits for any child process and returns `(pid, status)`
+- **`wait_any_nohang()`** - Checks any child without blocking and returns `Option<(pid, status)>`
 - **`getpgrp()`** - Returns the process group ID
 - **`getpid()`** - Returns the current process ID
 - **`getppid()`** - Returns the parent process ID
@@ -138,6 +140,15 @@ See the [documentation](https://docs.rs/fork) for detailed usage.
 ## Process Tree Example
 
 When using `daemon(false, false)`, it will change directory to `/` and redirect stdin/stdout/stderr to `/dev/null`.
+
+This matters for daemon startup code. Use absolute paths for PID files, logs,
+sockets, and config files: after `chdir("/")`, `File::create("myapp.pid")`
+tries to create `/myapp.pid`, not a file in the launch directory. With
+`noclose = false`, any `println!`, `eprintln!`, or panic output from that
+failure goes to `/dev/null`, which can make it look like the daemon block never
+ran. Use `daemon(true, false)` if relative paths should stay relative to the
+launch directory, and use `noclose = true` or a readiness pipe while debugging
+startup failures.
 
 Test running:
 
@@ -184,11 +195,24 @@ The `daemon()` function implements the classic double-fork pattern:
 
 This prevents the daemon from ever acquiring a controlling terminal.
 
+### Checked Startup
+
+`daemon()` intentionally follows the classic daemon pattern: after the first
+fork succeeds, the original parent exits before later setup steps run. If the
+launcher must observe setup success or failure, build a readiness handshake
+around the primitives in this crate. The usual pattern is to create a pipe
+before forking, keep the original parent blocked on the read end, and have the
+daemon child write success or an errno-style failure before the parent exits.
+
+See `examples/checked_daemon_pattern.rs` for a complete low-level example using
+`fork()`, `setsid()`, `chdir()`, `redirect_stdio()`, and a pre-fork pipe.
+
 ## Safety Notes
 
 - `daemon()` uses `_exit` in the forked parents to avoid running non-async-signal-safe destructors between fork/exec (POSIX-safe on Linux/macOS/BSD).
-- `redirect_stdio()` and `close_fd()` retry on `EINTR` for `open/dup2/close` to prevent spurious failures under signal-heavy workloads.
+- `redirect_stdio()` retries `open()` and `dup2()` on `EINTR`; `close_fd()` calls `close()` once and treats `EINTR` as success to avoid closing a reused fd.
 - Prefer `redirect_stdio()` over `close_fd()` so file descriptors 0,1,2 stay occupied (avoids accidental log/data corruption).
+- For supervisors, `HashMap` is appropriate: use raw PIDs or `Fork::Parent(pid)` as live child handles that are removed after reaping. Use your own monotonic id for durable state across restarts/history because operating systems reuse PIDs.
 
 ## Testing
 
@@ -222,6 +246,7 @@ This library is designed for Unix-like operating systems:
 See the [`examples/`](examples/) directory for more usage examples:
 
 - `example_daemon.rs` - Daemon creation
+- `checked_daemon_pattern.rs` - Checked startup pattern with a pre-fork pipe
 - `example_pipe.rs` - Fork with pipe communication
 - `example_touch_pid.rs` - PID file creation
 

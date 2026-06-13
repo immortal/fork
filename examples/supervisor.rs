@@ -9,8 +9,9 @@
 
 //! Process Supervisor Example
 //!
-//! Demonstrates how to use Fork with Hash to build a simple process supervisor
-//! that tracks multiple child processes and gets notified when they exit.
+//! Demonstrates how to build a simple process supervisor that tracks child
+//! processes by durable worker id, uses PID as a live lookup handle, and
+//! detects exits without blocking.
 //!
 //! Run with: cargo run --example supervisor
 
@@ -20,11 +21,17 @@ use std::{
     time::{Duration, Instant},
 };
 
-use fork::{Fork, WEXITSTATUS, WIFEXITED, fork, waitpid_nohang};
+use fork::{Fork, WEXITSTATUS, WIFEXITED, fork, wait_any_nohang};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct WorkerId(u64);
 
 #[derive(Debug)]
 struct ProcessInfo {
+    id: WorkerId,
+    worker_num: u32,
     name: String,
+    pid: libc::pid_t,
     started_at: Instant,
     restarts: u32,
 }
@@ -32,17 +39,13 @@ struct ProcessInfo {
 fn main() {
     println!("🚀 Starting Process Supervisor\n");
 
-    // HashMap using Fork as the key!
-    //
-    // Note: `Fork::Parent` compares by raw PID, and PIDs are recycled after a
-    // child is reaped. For a long-lived supervisor that restarts workers, a
-    // monotonic id of your own makes a safer key (see the `Fork` docs). This
-    // short demo reaps and replaces entries within one tick, so it's fine here.
-    let mut supervised: HashMap<Fork, ProcessInfo> = HashMap::new();
+    let mut supervised: HashMap<WorkerId, ProcessInfo> = HashMap::new();
+    let mut by_pid: HashMap<libc::pid_t, WorkerId> = HashMap::new();
 
     // Spawn 3 worker processes
-    for i in 1..=3 {
-        match spawn_worker(i, &mut supervised) {
+    for i in 1_u32..=3 {
+        let id = WorkerId(u64::from(i));
+        match spawn_worker(id, i, &mut supervised, &mut by_pid) {
             Ok(_) => println!("✅ Worker {} spawned", i),
             Err(e) => eprintln!("❌ Failed to spawn worker {}: {}", i, e),
         }
@@ -57,59 +60,68 @@ fn main() {
             break;
         }
 
-        // Non-blocking check of every supervised child. We collect the exits
-        // first, then mutate the map, so we never hold an immutable borrow of
-        // `supervised` while restarting (which inserts into it).
+        // Reap whichever children exited. The returned PID is a live lookup
+        // handle into by_pid; WorkerId is the durable supervisor identity.
         let mut exited = Vec::new();
-        for (fork_result, info) in &supervised {
-            if let Some(pid) = fork_result.child_pid() {
-                match waitpid_nohang(pid) {
-                    Ok(Some(status)) => {
+        loop {
+            match wait_any_nohang() {
+                Ok(Some((pid, status))) => {
+                    if let Some(id) = by_pid.get(&pid) {
+                        let info = supervised
+                            .get(id)
+                            .expect("pid map points to supervised worker");
                         let uptime = info.started_at.elapsed();
                         if WIFEXITED(status) {
                             println!(
-                                "\n💀 Worker '{}' (PID: {}) exited with code {} after {:.2}s",
+                                "\n💀 Worker '{}' (ID: {}, PID: {}) exited with code {} after {:.2}s",
                                 info.name,
-                                pid,
+                                info.id.0,
+                                info.pid,
                                 WEXITSTATUS(status),
                                 uptime.as_secs_f64()
                             );
                         } else {
                             println!(
-                                "\n💀 Worker '{}' (PID: {}) terminated after {:.2}s",
+                                "\n💀 Worker '{}' (ID: {}, PID: {}) terminated after {:.2}s",
                                 info.name,
-                                pid,
+                                info.id.0,
+                                info.pid,
                                 uptime.as_secs_f64()
                             );
                         }
-                        exited.push(*fork_result);
                     }
-                    Ok(None) => {
-                        // Still running - nothing to do this tick.
-                    }
-                    Err(e) => {
-                        // e.g. ECHILD: already reaped/gone. Drop it from the map.
-                        eprintln!("⚠️  waitpid_nohang({}) failed: {} - dropping", pid, e);
-                        exited.push(*fork_result);
-                    }
+                    exited.push(pid);
+                }
+                Ok(None) => break,
+                Err(e) if e.raw_os_error() == Some(libc::ECHILD) => {
+                    // No unwaited-for children remain.
+                    break;
+                }
+                Err(e) => {
+                    eprintln!("⚠️  wait_any_nohang failed: {}", e);
+                    break;
                 }
             }
         }
 
         // Handle exited processes
-        for fork_result in exited {
-            if let Some(info) = supervised.remove(&fork_result) {
+        for pid in exited {
+            if let Some(id) = by_pid.remove(&pid) {
+                let Some(info) = supervised.remove(&id) else {
+                    continue;
+                };
+
                 // Optional: Restart the worker
                 if info.restarts < 3 {
                     println!("🔄 Restarting worker '{}'...", info.name);
-                    let worker_num: u32 = info
-                        .name
-                        .split('-')
-                        .last()
-                        .and_then(|s| s.parse().ok())
-                        .unwrap_or(0);
 
-                    match restart_worker(worker_num, &mut supervised, info.restarts + 1) {
+                    match restart_worker(
+                        info.id,
+                        info.worker_num,
+                        &mut supervised,
+                        &mut by_pid,
+                        info.restarts + 1,
+                    ) {
                         Ok(_) => println!("✅ Worker '{}' restarted", info.name),
                         Err(e) => eprintln!("❌ Failed to restart: {}", e),
                     }
@@ -127,65 +139,77 @@ fn main() {
     }
 }
 
-fn spawn_worker(id: u32, supervised: &mut HashMap<Fork, ProcessInfo>) -> std::io::Result<()> {
-    match fork()? {
-        result @ Fork::Parent(_) => {
-            // Store in HashMap using Fork as key!
-            supervised.insert(
-                result,
-                ProcessInfo {
-                    name: format!("worker-{}", id),
-                    started_at: Instant::now(),
-                    restarts: 0,
-                },
-            );
-            Ok(())
-        }
-        Fork::Child => {
-            // Worker process - simulate some work
-            println!("👷 Worker {} starting work...", id);
-
-            // Simulate different work durations
-            Command::new("sleep")
-                .arg(format!("{}", id))
-                .status()
-                .expect("Failed to execute sleep");
-
-            println!("✅ Worker {} completed", id);
-            exit(0);
-        }
-    }
+fn spawn_worker(
+    id: WorkerId,
+    worker_num: u32,
+    supervised: &mut HashMap<WorkerId, ProcessInfo>,
+    by_pid: &mut HashMap<libc::pid_t, WorkerId>,
+) -> std::io::Result<()> {
+    spawn_worker_with_restart_count(id, worker_num, supervised, by_pid, 0)
 }
 
 fn restart_worker(
-    id: u32,
-    supervised: &mut HashMap<Fork, ProcessInfo>,
+    id: WorkerId,
+    worker_num: u32,
+    supervised: &mut HashMap<WorkerId, ProcessInfo>,
+    by_pid: &mut HashMap<libc::pid_t, WorkerId>,
+    restart_count: u32,
+) -> std::io::Result<()> {
+    spawn_worker_with_restart_count(id, worker_num, supervised, by_pid, restart_count)
+}
+
+fn spawn_worker_with_restart_count(
+    id: WorkerId,
+    worker_num: u32,
+    supervised: &mut HashMap<WorkerId, ProcessInfo>,
+    by_pid: &mut HashMap<libc::pid_t, WorkerId>,
     restart_count: u32,
 ) -> std::io::Result<()> {
     match fork()? {
-        result @ Fork::Parent(_) => {
+        Fork::Parent(pid) => {
             supervised.insert(
-                result,
+                id,
                 ProcessInfo {
-                    name: format!("worker-{}", id),
+                    id,
+                    worker_num,
+                    name: format!("worker-{}", worker_num),
+                    pid,
                     started_at: Instant::now(),
                     restarts: restart_count,
                 },
             );
+            by_pid.insert(pid, id);
             Ok(())
         }
         Fork::Child => {
-            println!(
-                "👷 Worker {} (restart #{}) starting work...",
-                id, restart_count
-            );
+            // Worker process - simulate some work
+            if restart_count == 0 {
+                println!("👷 Worker {} starting work...", worker_num);
+            } else {
+                println!(
+                    "👷 Worker {} (restart #{}) starting work...",
+                    worker_num, restart_count
+                );
+            }
 
+            // Simulate different work durations
             Command::new("sleep")
-                .arg("1")
+                .arg(if restart_count == 0 {
+                    worker_num.to_string()
+                } else {
+                    "1".to_string()
+                })
                 .status()
                 .expect("Failed to execute sleep");
 
-            println!("✅ Worker {} (restart #{}) completed", id, restart_count);
+            if restart_count == 0 {
+                println!("✅ Worker {} completed", worker_num);
+            } else {
+                println!(
+                    "✅ Worker {} (restart #{}) completed",
+                    worker_num, restart_count
+                );
+            }
             exit(0);
         }
     }

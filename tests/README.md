@@ -77,7 +77,7 @@ Tests include:
 
 ### `waitpid_tests.rs` - Waitpid Comprehensive Tests
 
-Tests all aspects of the `waitpid()` and `waitpid_nohang()` functions including error handling, exit codes, signal termination, and non-blocking waits.
+Tests all aspects of the `waitpid()`, `waitpid_nohang()`, `wait_any()`, and `wait_any_nohang()` functions including error handling, exit codes, signal termination, non-blocking waits, and any-child reaping.
 
 **Blocking waitpid() tests:**
 - **test_waitpid_invalid_pid** - ECHILD error for non-existent PID
@@ -101,6 +101,13 @@ Tests all aspects of the `waitpid()` and `waitpid_nohang()` functions including 
 - **test_waitpid_nohang_multiple_children** - Poll multiple children without blocking
 - **test_waitpid_nohang_returns_option** - Verify Option<c_int> return type
 - **test_waitpid_nohang_vs_blocking** - Compare blocking vs non-blocking behavior
+
+**Any-child wait tests:**
+- **test_wait_any_returns_reaped_pid_and_status** - Blocking wait for any child returns `(pid, status)`
+- **test_wait_any_nohang_child_still_running** - Returns None when children exist but none has exited
+- **test_wait_any_nohang_child_exited** - Returns the exited child's PID and status
+- **test_wait_any_nohang_multiple_children_identifies_each_reaped_child** - Reaps multiple children and maps each result by PID
+- **test_wait_any_nohang_echild_after_all_children_reaped** - ECHILD after all children are reaped
 
 ### `error_handling_tests.rs` - Error Path Tests
 
@@ -285,7 +292,7 @@ tests/
 ├── fork_tests.rs            # Fork tests (301 lines, 7 tests)
 ├── integration_tests.rs     # Advanced tests (284 lines, 7 tests)
 ├── stdio_redirect_tests.rs  # Stdio safety tests (313 lines, 7 tests)
-├── waitpid_tests.rs         # Waitpid tests (591 lines, 20 tests)
+├── waitpid_tests.rs         # Waitpid tests (794 lines, 25 tests)
 ├── error_handling_tests.rs  # Error tests (260 lines, 9 tests)
 ├── pid_tests.rs             # PID helper tests (252 lines, 10 tests)
 ├── status_macro_tests.rs    # Status macro tests (211 lines, 8 tests)

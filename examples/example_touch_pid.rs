@@ -9,7 +9,8 @@ use fork::{Fork, daemon};
 fn main() {
     match daemon(false, false) {
         Ok(Fork::Child) => {
-            // Touch a PID file from the daemon process itself
+            // Touch a PID file from the daemon process itself. Use an absolute
+            // path because daemon(false, false) changes cwd to `/`.
             let file_name = format!("/tmp/{}.pid", std::process::id());
             OpenOptions::new()
                 .write(true)

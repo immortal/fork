@@ -1,3 +1,32 @@
+## 0.8.0
+
+### Added
+* **`wait_any()` and `wait_any_nohang()`** - Add non-breaking wrappers around
+  `waitpid(-1, ...)` for supervisor-style process management.
+  - `wait_any()` blocks until any child terminates and returns `(pid, status)`.
+  - `wait_any_nohang()` checks for any terminated child without blocking and
+    returns `Ok(Some((pid, status)))` or `Ok(None)`.
+  - Existing `waitpid()` and `waitpid_nohang()` signatures are unchanged.
+* **Checked daemon startup example** - Added `checked_daemon_pattern.rs`,
+  demonstrating how to use a pre-fork pipe with the existing low-level
+  primitives when the launching process must observe setup success or failure.
+
+### Improved
+* Clarified supervisor identity guidance: `HashMap` remains appropriate for
+  tracking multiple live children, but long-lived restart/history state should
+  use an application-owned monotonic id with PID as the current live lookup
+  handle. Updated supervisor examples to show this pattern.
+* Documented the `daemon(false, false)` startup pitfall: relative paths are
+  resolved from `/`, and stdio/panic diagnostics are discarded through
+  `/dev/null`. PID/log/config paths should generally be absolute, or startup
+  should use `nochdir = true`, `noclose = true`, or a readiness pipe when
+  appropriate.
+
+### Fixed
+* Corrected README guidance for `close_fd()`/`close()` on `EINTR`: the safe
+  portable behavior is to call `close()` once and treat `EINTR` as success,
+  not to retry.
+
 ## 0.7.0
 
 ### Fixed

@@ -17,9 +17,10 @@
 #![allow(clippy::uninlined_format_args)]
 #![allow(clippy::indexing_slicing)]
 
-use fork::{Fork, fork, waitpid, waitpid_nohang};
+use fork::{Fork, fork, wait_any, wait_any_nohang, waitpid, waitpid_nohang};
 use libc::{WEXITSTATUS, WIFEXITED, WIFSIGNALED, WTERMSIG};
 use std::{
+    collections::HashMap,
     process::exit,
     sync::atomic::{AtomicBool, Ordering},
     thread,
@@ -643,6 +644,153 @@ fn test_waitpid_nohang_vs_blocking() {
             std::thread::sleep(Duration::from_millis(100));
             exit(0);
         }
+        Err(_) => panic!("Fork failed"),
+    }
+}
+
+// ============================================================================
+// wait_any() / wait_any_nohang() tests
+// ============================================================================
+
+#[test]
+fn test_wait_any_returns_reaped_pid_and_status() {
+    // Tests that wait_any reports which child was reaped, not just its status.
+    match fork() {
+        Ok(Fork::Parent(child)) => {
+            let (pid, status) = wait_any().expect("wait_any failed");
+
+            assert_eq!(pid, child, "wait_any should return the reaped child PID");
+            assert!(WIFEXITED(status), "Child should have exited normally");
+            assert_eq!(WEXITSTATUS(status), 77, "Exit code should be 77");
+        }
+        Ok(Fork::Child) => exit(77),
+        Err(_) => panic!("Fork failed"),
+    }
+}
+
+#[test]
+fn test_wait_any_nohang_child_still_running() {
+    // Tests that wait_any_nohang returns None when children exist but none has exited.
+    match fork() {
+        Ok(Fork::Parent(child)) => {
+            match wait_any_nohang() {
+                Ok(None) => {
+                    // Expected: child exists but is still running.
+                }
+                Ok(Some((pid, status))) => {
+                    panic!("Child {pid} exited too quickly with status: {status}");
+                }
+                Err(e) => {
+                    panic!("wait_any_nohang failed: {e}");
+                }
+            }
+
+            let status = waitpid(child).expect("waitpid failed");
+            assert!(WIFEXITED(status));
+        }
+        Ok(Fork::Child) => {
+            std::thread::sleep(Duration::from_millis(100));
+            exit(0);
+        }
+        Err(_) => panic!("Fork failed"),
+    }
+}
+
+#[test]
+fn test_wait_any_nohang_child_exited() {
+    // Tests that wait_any_nohang returns the exited child's PID and status.
+    match fork() {
+        Ok(Fork::Parent(child)) => {
+            std::thread::sleep(Duration::from_millis(50));
+
+            match wait_any_nohang() {
+                Ok(Some((pid, status))) => {
+                    assert_eq!(pid, child, "wait_any_nohang should return child PID");
+                    assert!(WIFEXITED(status), "Child should have exited normally");
+                    assert_eq!(WEXITSTATUS(status), 23);
+                }
+                Ok(None) => {
+                    panic!("Child should have exited by now");
+                }
+                Err(e) => {
+                    panic!("wait_any_nohang failed: {e}");
+                }
+            }
+        }
+        Ok(Fork::Child) => exit(23),
+        Err(_) => panic!("Fork failed"),
+    }
+}
+
+#[test]
+fn test_wait_any_nohang_multiple_children_identifies_each_reaped_child() {
+    // Tests the supervisor use-case: reap any exited child and map it back by PID.
+    let mut expected = HashMap::new();
+
+    for i in 0_u32..3 {
+        let exit_code: libc::c_int = i.try_into().unwrap();
+
+        match fork() {
+            Ok(Fork::Parent(child)) => {
+                expected.insert(child, exit_code);
+            }
+            Ok(Fork::Child) => {
+                std::thread::sleep(Duration::from_millis(40 * u64::from(i + 1)));
+                exit(exit_code);
+            }
+            Err(_) => panic!("Fork {i} failed"),
+        }
+    }
+
+    let mut reaped = HashMap::new();
+
+    for _ in 0..50 {
+        match wait_any_nohang() {
+            Ok(Some((pid, status))) => {
+                let exit_code = expected
+                    .remove(&pid)
+                    .unwrap_or_else(|| panic!("Unexpected child PID reaped: {pid}"));
+
+                assert!(WIFEXITED(status), "Child should have exited normally");
+                assert_eq!(WEXITSTATUS(status), exit_code);
+                reaped.insert(pid, exit_code);
+
+                if reaped.len() == 3 {
+                    break;
+                }
+            }
+            Ok(None) => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(e) => {
+                panic!("wait_any_nohang failed: {e}");
+            }
+        }
+    }
+
+    assert_eq!(reaped.len(), 3, "All children should have been reaped");
+    assert!(expected.is_empty(), "No expected children should remain");
+}
+
+#[test]
+fn test_wait_any_nohang_echild_after_all_children_reaped() {
+    match fork() {
+        Ok(Fork::Parent(_child)) => {
+            let (_pid, status) = wait_any().expect("wait_any failed");
+            assert!(WIFEXITED(status));
+
+            let result = wait_any_nohang();
+            assert!(
+                result.is_err(),
+                "wait_any_nohang should fail when no children remain"
+            );
+            assert_eq!(
+                result.unwrap_err().raw_os_error(),
+                Some(libc::ECHILD),
+                "Should return ECHILD after all children are reaped"
+            );
+        }
+        Ok(Fork::Child) => exit(0),
         Err(_) => panic!("Fork failed"),
     }
 }

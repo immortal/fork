@@ -18,20 +18,40 @@
 //!
 //! ## Process Supervisor
 //!
-//! Track multiple worker processes:
+//! Track multiple worker processes by durable worker id, with a PID lookup for
+//! wait results:
 //!
 //! ```no_run
-//! use fork::{fork, Fork, waitpid_nohang, WIFEXITED};
+//! use fork::{fork, wait_any_nohang, Fork, WIFEXITED};
 //! use std::collections::HashMap;
 //!
 //! # fn main() -> std::io::Result<()> {
+//! #[derive(Clone, Copy, Eq, Hash, PartialEq)]
+//! struct WorkerId(u64);
+//!
+//! struct Worker {
+//!     id: WorkerId,
+//!     pid: libc::pid_t,
+//!     name: String,
+//! }
+//!
 //! let mut workers = HashMap::new();
+//! let mut by_pid = HashMap::new();
 //!
 //! // Spawn 3 workers
 //! for i in 0..3 {
+//!     let id = WorkerId(i);
 //!     match fork()? {
-//!         result @ Fork::Parent(_) => {
-//!             workers.insert(result, format!("worker-{}", i));
+//!         Fork::Parent(pid) => {
+//!             workers.insert(
+//!                 id,
+//!                 Worker {
+//!                     id,
+//!                     pid,
+//!                     name: format!("worker-{}", i),
+//!                 },
+//!             );
+//!             by_pid.insert(pid, id);
 //!         }
 //!         Fork::Child => {
 //!             // Do work...
@@ -43,15 +63,25 @@
 //!
 //! // Monitor workers without blocking
 //! while !workers.is_empty() {
-//!     workers.retain(|child, name| {
-//!         match waitpid_nohang(child.child_pid().unwrap()) {
-//!             Ok(Some(status)) if WIFEXITED(status) => {
-//!                 println!("{} exited", name);
-//!                 false  // Remove from map
+//!     loop {
+//!         match wait_any_nohang()? {
+//!             Some((pid, status)) => {
+//!                 if let Some(id) = by_pid.remove(&pid) {
+//!                     let worker = workers.remove(&id).expect("pid map points to worker");
+//!                     if WIFEXITED(status) {
+//!                         println!(
+//!                             "{} (id {}, pid {}) exited",
+//!                             worker.name, worker.id.0, worker.pid
+//!                         );
+//!                     }
+//!                 }
+//!                 if workers.is_empty() {
+//!                     break;
+//!                 }
 //!             }
-//!             _ => true  // Keep in map
+//!             None => break,
 //!         }
-//!     });
+//!     }
 //!     std::thread::sleep(std::time::Duration::from_millis(100));
 //! }
 //! # Ok(())
@@ -102,6 +132,7 @@
 //! if let Ok(Fork::Child) = daemon(false, false) {
 //!     // Write PID file
 //!     let pid = getpid();
+//!     // Use an absolute path: daemon(false, false) changes cwd to `/`.
 //!     let mut file = File::create("/var/run/myapp.pid")?;
 //!     writeln!(file, "{}", pid)?;
 //!
@@ -122,6 +153,8 @@
 //! - **Prefer `redirect_stdio()`** - Safer than `close_fd()` for daemons
 //! - **Fork early** - Before creating threads, locks, or complex state
 //! - **Close unused file descriptors** - Prevent resource leaks in children
+//! - **Use durable supervisor ids** - Treat PIDs as live process handles, not
+//!   historical identity, because operating systems reuse PIDs after reaping
 //! - **Handle signals properly** - Consider what happens in both processes
 //!
 //! # Platform Compatibility
@@ -145,14 +178,17 @@ pub use libc::{WEXITSTATUS, WIFEXITED, WIFSIGNALED, WTERMSIG};
 ///
 /// # Using `Fork` as a map key
 ///
-/// `Fork` derives `Hash`, `Eq`, and `Copy` so it can be used as a `HashMap`
-/// key (e.g. in a process supervisor). Be aware that equality is based solely
-/// on the raw PID inside `Fork::Parent`, and **PIDs are recycled by the OS once
-/// a child is reaped**. After you `waitpid` a child, a newly spawned child may
-/// receive the same PID, producing a `Fork::Parent(pid)` that compares *equal*
-/// to the dead one and silently collides in the map. If you track children
-/// across their full lifetime, prefer a monotonic id of your own as the key and
-/// keep the PID as a field.
+/// `Fork` derives `Hash`, `Eq`, and `Copy`, but equality is based solely on the
+/// raw PID inside `Fork::Parent`. A `Fork::Parent(pid)` key is therefore only a
+/// PID key. This is fine for short-lived tables of currently-running children
+/// when entries are removed as soon as children are reaped.
+///
+/// Do not use `Fork::Parent(pid)` as a durable process identity across restarts
+/// or historical supervisor state. **PIDs are recycled by the OS once a child
+/// is reaped**, so a later child may receive the same PID and compare equal to
+/// an old `Fork::Parent(pid)`. For long-lived supervisors, prefer a monotonic
+/// logical id of your own as the durable key and keep the current PID as a
+/// field or secondary lookup key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Fork {
     Parent(libc::pid_t),
@@ -505,23 +541,7 @@ pub fn fork() -> io::Result<Fork> {
 ///}
 ///```
 pub fn waitpid(pid: libc::pid_t) -> io::Result<libc::c_int> {
-    let mut status: libc::c_int = 0;
-    loop {
-        // SAFETY: &raw mut status provides a raw pointer to initialized memory
-        let res = unsafe { libc::waitpid(pid, &raw mut status, 0) };
-
-        if res == -1 {
-            let err = io::Error::last_os_error();
-
-            if err.kind() == io::ErrorKind::Interrupted {
-                continue;
-            }
-
-            return Err(err);
-        }
-
-        return Ok(status);
-    }
+    waitpid_reaped(pid, 0).map(|(_, status)| status)
 }
 
 /// Wait for process to change status without blocking [see wait(2)](https://man.freebsd.org/cgi/man.cgi?waitpid)
@@ -590,10 +610,161 @@ pub fn waitpid(pid: libc::pid_t) -> io::Result<libc::c_int> {
 /// - No child process exists with the given PID (ECHILD)
 /// - Invalid options or PID
 pub fn waitpid_nohang(pid: libc::pid_t) -> io::Result<Option<libc::c_int>> {
+    waitpid_reaped_nohang(pid, libc::WNOHANG).map(|maybe_child| {
+        maybe_child.map(|(_pid, status)| {
+            // Child terminated (only WNOHANG is set, so stop/continue are not reported)
+            status
+        })
+    })
+}
+
+/// Wait for any child process to terminate [see wait(2)](https://man.freebsd.org/cgi/man.cgi?waitpid)
+///
+/// This is equivalent to `waitpid(-1, ...)`: it blocks until any child process
+/// terminates, then returns both the PID that was reaped and its raw status.
+///
+/// Use this when supervising multiple children. Unlike [`waitpid()`], which is
+/// aimed at a specific child PID and returns only the status, this function
+/// preserves the child PID returned by the underlying `waitpid` system call.
+///
+/// # Reaping behavior
+/// Because this calls `waitpid(-1, ...)`, it reaps **any** child of the current
+/// process — including children spawned by other parts of the program, such as
+/// [`std::process::Command`]. If you reap such a child here, the standard
+/// library's [`std::process::Child::wait`]/`try_wait` will later fail with
+/// `ECHILD` because the child no longer exists. Only use `wait_any()` in
+/// programs that manage all of their children directly through this crate.
+///
+/// # Behavior
+/// - Blocks until any child terminates
+/// - Retries automatically on `EINTR` (interrupted by signal)
+/// - Returns `(pid, status)` where `pid` identifies the child that was reaped
+/// - Returns the raw status (use `libc::WIFEXITED`, `libc::WEXITSTATUS`, etc.)
+///
+/// # Errors
+/// Returns an [`io::Error`] if the waitpid system call fails. Common errors include:
+/// - No unwaited-for child processes exist (ECHILD)
+/// - Invalid options
+///
+/// # Example
+///
+/// ```
+/// use fork::{fork, wait_any, Fork, WEXITSTATUS, WIFEXITED};
+///
+/// match fork::fork() {
+///     Ok(Fork::Parent(child)) => {
+///         let (pid, status) = wait_any()?;
+///         assert_eq!(pid, child);
+///         assert!(WIFEXITED(status));
+///         assert_eq!(WEXITSTATUS(status), 0);
+///     }
+///     Ok(Fork::Child) => std::process::exit(0),
+///     Err(e) => eprintln!("Fork failed: {e}"),
+/// }
+/// # Ok::<(), std::io::Error>(())
+/// ```
+pub fn wait_any() -> io::Result<(libc::pid_t, libc::c_int)> {
+    waitpid_reaped(-1, 0)
+}
+
+/// Wait for any child process to terminate without blocking [see wait(2)](https://man.freebsd.org/cgi/man.cgi?waitpid)
+///
+/// This is the non-blocking variant of [`wait_any()`]. It is equivalent to
+/// `waitpid(-1, ..., WNOHANG)`: it checks whether any child has terminated and
+/// returns immediately.
+///
+/// # Reaping behavior
+/// Like [`wait_any()`], this reaps **any** child of the current process,
+/// including ones spawned by [`std::process::Command`]. Reaping such a child
+/// here makes the standard library's [`std::process::Child::wait`]/`try_wait`
+/// fail with `ECHILD`. Only use it in programs that manage all of their
+/// children directly through this crate.
+///
+/// # Return Value
+/// - `Ok(Some((pid, status)))` - A child terminated; `pid` identifies the reaped child
+/// - `Ok(None)` - Child processes exist, but none has terminated yet
+/// - `Err(...)` - Error occurred (e.g., ECHILD if there are no unwaited-for children)
+///
+/// # Behavior
+/// - Returns immediately (does not block)
+/// - Retries automatically on `EINTR` (interrupted by signal)
+/// - Returns the raw status (use `libc::WIFEXITED`, `libc::WEXITSTATUS`, etc.)
+/// - Only `WNOHANG` is passed: termination (exit or signal) is reported, but a
+///   child that merely *stopped* or *continued* returns `Ok(None)`, since
+///   `WUNTRACED`/`WCONTINUED` are not requested
+///
+/// # Use Cases
+/// - **Process supervisors** - Reap whichever child exited and identify it
+/// - **Event loops** - Drain exited children after SIGCHLD without blocking
+/// - **Polling patterns** - Avoid checking every known child PID individually
+///
+/// # Errors
+/// Returns an [`io::Error`] if the waitpid system call fails. Common errors include:
+/// - No unwaited-for child processes exist (ECHILD)
+/// - Invalid options
+///
+/// # Example
+///
+/// ```
+/// use fork::{fork, wait_any_nohang, waitpid, Fork, WIFEXITED};
+/// use std::time::Duration;
+///
+/// match fork::fork() {
+///     Ok(Fork::Parent(child)) => {
+///         match wait_any_nohang()? {
+///             Some((_pid, _status)) => {
+///                 // Child exited before the first poll.
+///             }
+///             None => {
+///                 std::thread::sleep(Duration::from_millis(50));
+///                 let status = waitpid(child)?;
+///                 assert!(WIFEXITED(status));
+///             }
+///         }
+///     }
+///     Ok(Fork::Child) => {
+///         std::thread::sleep(Duration::from_millis(10));
+///         std::process::exit(0);
+///     }
+///     Err(e) => eprintln!("Fork failed: {e}"),
+/// }
+/// # Ok::<(), std::io::Error>(())
+/// ```
+pub fn wait_any_nohang() -> io::Result<Option<(libc::pid_t, libc::c_int)>> {
+    waitpid_reaped_nohang(-1, libc::WNOHANG)
+}
+
+fn waitpid_reaped(
+    pid: libc::pid_t,
+    options: libc::c_int,
+) -> io::Result<(libc::pid_t, libc::c_int)> {
     let mut status: libc::c_int = 0;
     loop {
         // SAFETY: &raw mut status provides a raw pointer to initialized memory
-        let res = unsafe { libc::waitpid(pid, &raw mut status, libc::WNOHANG) };
+        let res = unsafe { libc::waitpid(pid, &raw mut status, options) };
+
+        if res == -1 {
+            let err = io::Error::last_os_error();
+
+            if err.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+
+            return Err(err);
+        }
+
+        return Ok((res, status));
+    }
+}
+
+fn waitpid_reaped_nohang(
+    pid: libc::pid_t,
+    options: libc::c_int,
+) -> io::Result<Option<(libc::pid_t, libc::c_int)>> {
+    let mut status: libc::c_int = 0;
+    loop {
+        // SAFETY: &raw mut status provides a raw pointer to initialized memory
+        let res = unsafe { libc::waitpid(pid, &raw mut status, options) };
 
         if res == 0 {
             // Child has not changed state (still running)
@@ -610,8 +781,7 @@ pub fn waitpid_nohang(pid: libc::pid_t) -> io::Result<Option<libc::c_int>> {
             return Err(err);
         }
 
-        // Child terminated (only WNOHANG is set, so stop/continue are not reported)
-        return Ok(Some(status));
+        return Ok(Some((res, status)));
     }
 }
 
@@ -725,6 +895,35 @@ pub fn getppid() -> libc::pid_t {
 /// * `nochdir = false`, changes the current working directory to the root (`/`).
 /// * `noclose = false`, redirects stdin, stdout, and stderr to `/dev/null`
 ///
+/// # Common pitfall: relative paths and hidden diagnostics
+///
+/// With `daemon(false, false)`, code after `daemon()` runs with cwd `/` and
+/// stdio attached to `/dev/null`. A relative path such as
+/// `File::create("myapp.pid")` is therefore resolved as `/myapp.pid`, not as a
+/// file in the directory that launched the program. If creating that file fails,
+/// `println!`, `eprintln!`, and panic output are also discarded because stderr
+/// points at `/dev/null`.
+///
+/// Use absolute paths for PID files, logs, sockets, and config files. If your
+/// daemon intentionally depends on the launch directory, pass `nochdir = true`.
+/// While debugging startup, consider `noclose = true` or a readiness pipe so
+/// errors can be observed by the launcher.
+///
+/// # Not performed by this function
+///
+/// `daemon()` is intentionally minimal. It does **not** perform several hardening
+/// steps that some daemons want; do them yourself if you need them:
+///
+/// - **`umask`** — the parent's file-mode creation mask is inherited unchanged.
+///   Call `unsafe { libc::umask(0) }` (or your preferred mask) if file
+///   permissions matter.
+/// - **Closing inherited file descriptors > 2** — only stdin/stdout/stderr are
+///   handled (and only when `noclose = false`). Any other descriptor the parent
+///   left open is inherited by the daemon; close them before or after forking.
+/// - **Resetting signal state** — inherited signal dispositions and the signal
+///   mask are left as-is. Reset them with `sigaction`/`sigprocmask` if the parent
+///   may have customized them.
+///
 /// # Return Value
 ///
 /// This function only ever returns in the **daemon (grandchild) process**:
@@ -748,7 +947,8 @@ pub fn getppid() -> libc::pid_t {
 /// later failures cannot be surfaced to the original process. If you need the
 /// launcher to confirm the daemon actually started, implement a readiness
 /// handshake (e.g. a pipe the parent reads before exiting) rather than relying
-/// on this return value.
+/// on this return value. See `examples/checked_daemon_pattern.rs` for a
+/// low-level pattern built from this crate's primitives.
 ///
 /// ```no_run
 /// use fork::{daemon, Fork};

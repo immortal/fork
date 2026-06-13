@@ -13,11 +13,12 @@
 #![allow(clippy::ignored_unit_patterns)]
 #![allow(clippy::for_kv_map)]
 
-//! Advanced Process Supervisor with Signal Handling
+//! Advanced Process Supervisor
 //!
-//! This example shows how to build a production-ready supervisor that:
-//! - Uses Fork with Hash to track processes in a HashMap
-//! - Gets notified when child processes exit (via SIGCHLD)
+//! This example shows how to build a supervisor that:
+//! - Tracks supervised processes by stable worker id in a HashMap
+//! - Uses PID as a live lookup handle for wait_any_nohang() results
+//! - Reaps whichever child exits using wait_any_nohang()
 //! - Automatically restarts failed processes
 //! - Tracks process metrics (uptime, restart count)
 //! - Gracefully shuts down all children
@@ -35,19 +36,26 @@ use std::{
     time::{Duration, Instant},
 };
 
-use fork::{Fork, fork, waitpid, waitpid_nohang};
+use fork::{Fork, fork, wait_any_nohang, waitpid};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct WorkerId(u64);
 
 #[derive(Debug, Clone)]
 struct ProcessInfo {
+    id: WorkerId,
     name: String,
     pid: libc::pid_t,
+    command: Vec<String>,
     started_at: Instant,
     restarts: u32,
     max_restarts: u32,
 }
 
 struct Supervisor {
-    processes: HashMap<Fork, ProcessInfo>,
+    processes: HashMap<WorkerId, ProcessInfo>,
+    by_pid: HashMap<libc::pid_t, WorkerId>,
+    next_id: u64,
     shutdown: Arc<AtomicBool>,
 }
 
@@ -55,29 +63,34 @@ impl Supervisor {
     fn new() -> Self {
         Self {
             processes: HashMap::new(),
+            by_pid: HashMap::new(),
+            next_id: 1,
             shutdown: Arc::new(AtomicBool::new(false)),
         }
     }
 
     /// Spawn a new supervised process
-    fn spawn(&mut self, name: String, command: Vec<String>) -> std::io::Result<Fork> {
+    fn spawn(&mut self, name: String, command: Vec<String>) -> std::io::Result<WorkerId> {
+        let id = self.allocate_id();
         match fork()? {
-            result @ Fork::Parent(pid) => {
-                println!("✅ Spawned '{}' with PID: {}", name, pid);
+            Fork::Parent(pid) => {
+                println!("✅ Spawned '{}' with ID: {}, PID: {}", name, id.0, pid);
 
-                // Store using Fork as HashMap key!
                 self.processes.insert(
-                    result,
+                    id,
                     ProcessInfo {
+                        id,
                         name: name.clone(),
                         pid,
+                        command,
                         started_at: Instant::now(),
                         restarts: 0,
                         max_restarts: 3,
                     },
                 );
+                self.by_pid.insert(pid, id);
 
-                Ok(result)
+                Ok(id)
             }
             Fork::Child => {
                 // Child process - execute the command
@@ -94,17 +107,28 @@ impl Supervisor {
         }
     }
 
+    fn allocate_id(&mut self) -> WorkerId {
+        let id = WorkerId(self.next_id);
+        self.next_id += 1;
+        id
+    }
+
     /// Handle a process exit
-    fn handle_exit(&mut self, fork_result: Fork) {
-        if let Some(info) = self.processes.remove(&fork_result) {
+    fn handle_exit(&mut self, pid: libc::pid_t) {
+        if let Some(id) = self.by_pid.remove(&pid) {
+            let Some(info) = self.processes.remove(&id) else {
+                return;
+            };
+
             let uptime = info.started_at.elapsed();
             let name = info.name.clone();
             let restarts = info.restarts;
             let max_restarts = info.max_restarts;
 
             println!(
-                "\n💀 Process '{}' (PID: {}) exited after {:.2}s",
+                "\n💀 Process '{}' (ID: {}, PID: {}) exited after {:.2}s",
                 name,
+                info.id.0,
                 info.pid,
                 uptime.as_secs_f64()
             );
@@ -133,16 +157,15 @@ impl Supervisor {
     /// Restart a process
     fn restart(&mut self, mut info: ProcessInfo) -> std::io::Result<()> {
         let name = info.name.clone();
+        let command = info.command.clone();
         info.restarts += 1;
         info.started_at = Instant::now();
 
-        // Simulate command (in real code, store original command)
-        let command = vec!["sleep".to_string(), "2".to_string()];
-
         match fork()? {
-            result @ Fork::Parent(pid) => {
+            Fork::Parent(pid) => {
                 info.pid = pid;
-                self.processes.insert(result, info);
+                self.by_pid.insert(pid, info.id);
+                self.processes.insert(info.id, info);
                 Ok(())
             }
             Fork::Child => {
@@ -157,26 +180,26 @@ impl Supervisor {
 
     /// Poll all children for exits without blocking.
     fn wait_for_exit(&mut self) -> std::io::Result<()> {
-        // Non-blocking poll of every known child. We collect the ones that
-        // terminated first, then handle them, so we never call into the map
-        // mutating path (`handle_exit` -> `restart`) while borrowing it.
-        //
-        // A real supervisor would instead reap with `waitpid(-1, ...)` driven
-        // by a SIGCHLD handler; `waitpid_nohang` discards which PID was reaped,
-        // so here we poll each tracked PID individually.
+        // Reap whichever children exited and collect their PIDs first, then
+        // handle them so the restart path can mutate the process map.
         let mut exited = Vec::new();
-        for (fork_result, _info) in &self.processes {
-            if let Some(pid) = fork_result.child_pid() {
-                match waitpid_nohang(pid) {
-                    Ok(Some(_status)) => exited.push(*fork_result),
-                    Ok(None) => {}                       // still running
-                    Err(_) => exited.push(*fork_result), // e.g. ECHILD: already gone
+        loop {
+            match wait_any_nohang() {
+                Ok(Some((pid, _status))) => {
+                    exited.push(pid);
                 }
+                Ok(None) => {
+                    break;
+                }
+                Err(e) if e.raw_os_error() == Some(libc::ECHILD) => {
+                    break;
+                }
+                Err(e) => return Err(e),
             }
         }
 
-        for fork_result in exited {
-            self.handle_exit(fork_result);
+        for pid in exited {
+            self.handle_exit(pid);
         }
 
         // Back off briefly between polls.
@@ -198,18 +221,18 @@ impl Supervisor {
     /// List all supervised processes
     fn list(&self) {
         println!("\n📋 Supervised Processes:");
-        println!("┌─────────────────┬──────────┬──────────┬──────────┐");
-        println!("│ Name            │ PID      │ Uptime   │ Restarts │");
-        println!("├─────────────────┼──────────┼──────────┼──────────┤");
+        println!("┌──────┬─────────────────┬──────────┬──────────┬──────────┐");
+        println!("│ ID   │ Name            │ PID      │ Uptime   │ Restarts │");
+        println!("├──────┼─────────────────┼──────────┼──────────┼──────────┤");
 
-        for (_fork, info) in &self.processes {
-            let uptime = info.started_at.elapsed().as_secs();
+        for info in self.processes.values() {
+            let uptime = format!("{}s", info.started_at.elapsed().as_secs());
             println!(
-                "│ {:15} │ {:8} │ {:6}s │ {:8} │",
-                info.name, info.pid, uptime, info.restarts
+                "│ {:4} │ {:15} │ {:8} │ {:>8} │ {:8} │",
+                info.id.0, info.name, info.pid, uptime, info.restarts
             );
         }
-        println!("└─────────────────┴──────────┴──────────┴──────────┘\n");
+        println!("└──────┴─────────────────┴──────────┴──────────┴──────────┘\n");
     }
 
     /// Shutdown all supervised processes
@@ -220,14 +243,13 @@ impl Supervisor {
         // Send SIGTERM to all children (not shown - would use libc::kill)
         // Then wait for them to exit gracefully
 
-        for (fork_result, info) in &self.processes {
+        for info in self.processes.values() {
             println!("  Stopping '{}' (PID: {})", info.name, info.pid);
-            if let Some(pid) = fork_result.child_pid() {
-                // In production: unsafe { libc::kill(pid, libc::SIGTERM) };
-                let _ = waitpid(pid);
-            }
+            // In production: unsafe { libc::kill(info.pid, libc::SIGTERM) };
+            let _ = waitpid(info.pid);
         }
 
+        self.by_pid.clear();
         self.processes.clear();
         println!("✅ All processes stopped");
     }
