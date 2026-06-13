@@ -186,7 +186,7 @@ _deploy-merge-and-tag:
     echo "   - develop branch: bumped and pushed"
     echo "   - main branch: merged and pushed"
     echo "   - tag $new_version: created and pushed"
-    echo "🔗 Monitor release: https://github.com/nbari/pg_exporter/actions"
+    echo "🔗 Monitor release: https://github.com/immortal/fork/actions"
 
 # Deploy: merge to main, tag, and push everything
 deploy: bump _deploy-merge-and-tag

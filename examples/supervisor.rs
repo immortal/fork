@@ -20,7 +20,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use fork::{Fork, fork, waitpid};
+use fork::{Fork, WEXITSTATUS, WIFEXITED, fork, waitpid_nohang};
 
 #[derive(Debug)]
 struct ProcessInfo {
@@ -33,6 +33,11 @@ fn main() {
     println!("🚀 Starting Process Supervisor\n");
 
     // HashMap using Fork as the key!
+    //
+    // Note: `Fork::Parent` compares by raw PID, and PIDs are recycled after a
+    // child is reaped. For a long-lived supervisor that restarts workers, a
+    // monotonic id of your own makes a safer key (see the `Fork` docs). This
+    // short demo reaps and replaces entries within one tick, so it's fine here.
     let mut supervised: HashMap<Fork, ProcessInfo> = HashMap::new();
 
     // Spawn 3 worker processes
@@ -45,42 +50,47 @@ fn main() {
 
     println!("\n📊 Supervisor managing {} processes\n", supervised.len());
 
-    // Supervisor loop - wait for children to exit
+    // Supervisor loop - poll for child exits without blocking.
     loop {
         if supervised.is_empty() {
             println!("✅ All workers completed. Supervisor exiting.");
             break;
         }
 
-        // Check each supervised process
+        // Non-blocking check of every supervised child. We collect the exits
+        // first, then mutate the map, so we never hold an immutable borrow of
+        // `supervised` while restarting (which inserts into it).
         let mut exited = Vec::new();
-
         for (fork_result, info) in &supervised {
             if let Some(pid) = fork_result.child_pid() {
-                // Try non-blocking wait to see if process exited
-                // Note: In real code, you'd use WNOHANG with waitpid
-                // For this example, we'll simulate with a simple check
-                println!("⏳ Checking worker '{}' (PID: {})", info.name, pid);
-            }
-        }
-
-        // In a real supervisor, you'd use signal handlers (SIGCHLD)
-        // or non-blocking waitpid with WNOHANG to detect exits
-        // For this demo, we'll wait for any child
-        std::thread::sleep(Duration::from_millis(500));
-
-        // Simple approach: try to find which child exited
-        // In production, use SIGCHLD signal handler
-        for (fork_result, _info) in &supervised {
-            if let Some(pid) = fork_result.child_pid() {
-                // Check if this specific child exited (blocking wait)
-                // In real code, use waitpid with WNOHANG
-                match waitpid(pid) {
-                    Ok(_) => {
+                match waitpid_nohang(pid) {
+                    Ok(Some(status)) => {
+                        let uptime = info.started_at.elapsed();
+                        if WIFEXITED(status) {
+                            println!(
+                                "\n💀 Worker '{}' (PID: {}) exited with code {} after {:.2}s",
+                                info.name,
+                                pid,
+                                WEXITSTATUS(status),
+                                uptime.as_secs_f64()
+                            );
+                        } else {
+                            println!(
+                                "\n💀 Worker '{}' (PID: {}) terminated after {:.2}s",
+                                info.name,
+                                pid,
+                                uptime.as_secs_f64()
+                            );
+                        }
                         exited.push(*fork_result);
                     }
-                    Err(_) => {
-                        // Process still running or error
+                    Ok(None) => {
+                        // Still running - nothing to do this tick.
+                    }
+                    Err(e) => {
+                        // e.g. ECHILD: already reaped/gone. Drop it from the map.
+                        eprintln!("⚠️  waitpid_nohang({}) failed: {} - dropping", pid, e);
+                        exited.push(*fork_result);
                     }
                 }
             }
@@ -89,16 +99,6 @@ fn main() {
         // Handle exited processes
         for fork_result in exited {
             if let Some(info) = supervised.remove(&fork_result) {
-                let pid = fork_result.child_pid().unwrap();
-                let uptime = info.started_at.elapsed();
-
-                println!(
-                    "\n💀 Worker '{}' (PID: {}) exited after {:.2}s",
-                    info.name,
-                    pid,
-                    uptime.as_secs_f64()
-                );
-
                 // Optional: Restart the worker
                 if info.restarts < 3 {
                     println!("🔄 Restarting worker '{}'...", info.name);
@@ -121,6 +121,9 @@ fn main() {
                 }
             }
         }
+
+        // Poll interval. In production prefer a SIGCHLD handler over polling.
+        std::thread::sleep(Duration::from_millis(100));
     }
 }
 

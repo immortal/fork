@@ -35,7 +35,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use fork::{Fork, fork, waitpid};
+use fork::{Fork, fork, waitpid, waitpid_nohang};
 
 #[derive(Debug, Clone)]
 struct ProcessInfo {
@@ -155,28 +155,31 @@ impl Supervisor {
         }
     }
 
-    /// Wait for any child to exit (blocking)
+    /// Poll all children for exits without blocking.
     fn wait_for_exit(&mut self) -> std::io::Result<()> {
-        // In production, you'd use waitpid(-1, &mut status, 0) to wait for ANY child
-        // For this example, we'll iterate through known processes
-
-        for (fork_result, _info) in self.processes.clone().iter() {
+        // Non-blocking poll of every known child. We collect the ones that
+        // terminated first, then handle them, so we never call into the map
+        // mutating path (`handle_exit` -> `restart`) while borrowing it.
+        //
+        // A real supervisor would instead reap with `waitpid(-1, ...)` driven
+        // by a SIGCHLD handler; `waitpid_nohang` discards which PID was reaped,
+        // so here we poll each tracked PID individually.
+        let mut exited = Vec::new();
+        for (fork_result, _info) in &self.processes {
             if let Some(pid) = fork_result.child_pid() {
-                // Try to wait for this specific child (blocking)
-                match waitpid(pid) {
-                    Ok(_) => {
-                        self.handle_exit(*fork_result);
-                        return Ok(());
-                    }
-                    Err(_) => {
-                        // This child hasn't exited yet, continue
-                        continue;
-                    }
+                match waitpid_nohang(pid) {
+                    Ok(Some(_status)) => exited.push(*fork_result),
+                    Ok(None) => {}                       // still running
+                    Err(_) => exited.push(*fork_result), // e.g. ECHILD: already gone
                 }
             }
         }
 
-        // No children exited yet
+        for fork_result in exited {
+            self.handle_exit(fork_result);
+        }
+
+        // Back off briefly between polls.
         thread::sleep(Duration::from_millis(100));
         Ok(())
     }

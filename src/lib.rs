@@ -142,6 +142,17 @@ use std::io;
 pub use libc::{WEXITSTATUS, WIFEXITED, WIFSIGNALED, WTERMSIG};
 
 /// Fork result
+///
+/// # Using `Fork` as a map key
+///
+/// `Fork` derives `Hash`, `Eq`, and `Copy` so it can be used as a `HashMap`
+/// key (e.g. in a process supervisor). Be aware that equality is based solely
+/// on the raw PID inside `Fork::Parent`, and **PIDs are recycled by the OS once
+/// a child is reaped**. After you `waitpid` a child, a newly spawned child may
+/// receive the same PID, producing a `Fork::Parent(pid)` that compares *equal*
+/// to the dead one and silently collides in the map. If you track children
+/// across their full lifetime, prefer a monotonic id of your own as the key and
+/// keep the PID as a field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Fork {
     Parent(libc::pid_t),
@@ -519,14 +530,17 @@ pub fn waitpid(pid: libc::pid_t) -> io::Result<libc::c_int> {
 /// changed status and returns immediately without blocking.
 ///
 /// # Return Value
-/// - `Ok(Some(status))` - Child has exited/stopped with the given status
-/// - `Ok(None)` - Child is still running (no state change)
+/// - `Ok(Some(status))` - Child has terminated with the given status
+/// - `Ok(None)` - Child is still running (no reportable state change)
 /// - `Err(...)` - Error occurred (e.g., ECHILD if child doesn't exist)
 ///
 /// # Behavior
 /// - Returns immediately (does not block)
 /// - Retries automatically on `EINTR` (interrupted by signal)
 /// - Returns the raw status (use `libc::WIFEXITED`, `libc::WEXITSTATUS`, etc.)
+/// - Only `WNOHANG` is passed: termination (exit or signal) is reported, but a
+///   child that merely *stopped* or *continued* returns `Ok(None)`, since
+///   `WUNTRACED`/`WCONTINUED` are not requested
 ///
 /// # Use Cases
 /// - **Process supervisors** - Monitor multiple children without blocking
@@ -596,7 +610,7 @@ pub fn waitpid_nohang(pid: libc::pid_t) -> io::Result<Option<libc::c_int>> {
             return Err(err);
         }
 
-        // Child changed state (exited, stopped, continued, etc.)
+        // Child terminated (only WNOHANG is set, so stop/continue are not reported)
         return Ok(Some(status));
     }
 }
@@ -721,6 +735,20 @@ pub fn getppid() -> libc::pid_t {
 ///
 /// **`Ok(Fork::Parent(_))` is never returned** because both parent processes
 /// call `_exit(0)` internally. You do not need to match on it:
+///
+/// # Error observability
+///
+/// The original (launching) process calls `_exit(0)` at the **first** fork,
+/// before `setsid()`, `chdir()`, and `redirect_stdio()` run. As a result, an
+/// `Err(...)` from any of those steps is returned only inside the detached
+/// first child — a background process with no controlling terminal, whose
+/// stderr may already point at `/dev/null` (when `noclose == false`). The
+/// launching shell, meanwhile, has already observed exit code `0`. In other
+/// words, only a failure of the *first* `fork()` is reportable to the caller;
+/// later failures cannot be surfaced to the original process. If you need the
+/// launcher to confirm the daemon actually started, implement a readiness
+/// handshake (e.g. a pipe the parent reads before exiting) rather than relying
+/// on this return value.
 ///
 /// ```no_run
 /// use fork::{daemon, Fork};
