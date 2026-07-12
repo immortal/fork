@@ -22,13 +22,23 @@ use libc::{WEXITSTATUS, WIFEXITED, WIFSIGNALED, WTERMSIG};
 use std::{
     collections::HashMap,
     process::exit,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::{
+        Mutex, MutexGuard,
+        atomic::{AtomicBool, Ordering},
+    },
     thread,
     time::Duration,
 };
 
+static TEST_SERIAL: Mutex<()> = Mutex::new(());
+
+fn test_lock() -> MutexGuard<'static, ()> {
+    TEST_SERIAL.lock().expect("waitpid test lock poisoned")
+}
+
 #[test]
 fn test_waitpid_invalid_pid() {
+    let _lock = test_lock();
     // Tests that waitpid returns error for non-existent PID
     // Expected behavior:
     // 1. Try to wait on a PID that doesn't exist
@@ -55,6 +65,7 @@ fn test_waitpid_invalid_pid() {
 
 #[test]
 fn test_waitpid_double_wait() {
+    let _lock = test_lock();
     // Tests that waitpid fails when called twice on same child
     // Expected behavior:
     // 1. First waitpid succeeds and reaps the child
@@ -85,6 +96,7 @@ fn test_waitpid_double_wait() {
 
 #[test]
 fn test_waitpid_exit_code_zero() {
+    let _lock = test_lock();
     // Tests that waitpid correctly reports exit code 0 (success)
     // Expected behavior:
     // 1. Child exits with code 0
@@ -104,6 +116,7 @@ fn test_waitpid_exit_code_zero() {
 
 #[test]
 fn test_waitpid_exit_code_one() {
+    let _lock = test_lock();
     // Tests that waitpid correctly reports exit code 1 (error)
     match fork() {
         Ok(Fork::Parent(child)) => {
@@ -118,6 +131,7 @@ fn test_waitpid_exit_code_one() {
 
 #[test]
 fn test_waitpid_exit_code_42() {
+    let _lock = test_lock();
     // Tests that waitpid correctly reports arbitrary exit code 42
     match fork() {
         Ok(Fork::Parent(child)) => {
@@ -132,6 +146,7 @@ fn test_waitpid_exit_code_42() {
 
 #[test]
 fn test_waitpid_exit_code_127() {
+    let _lock = test_lock();
     // Tests that waitpid correctly reports exit code 127
     // (commonly used for "command not found")
     match fork() {
@@ -147,6 +162,7 @@ fn test_waitpid_exit_code_127() {
 
 #[test]
 fn test_waitpid_multiple_exit_codes() {
+    let _lock = test_lock();
     // Tests that waitpid correctly reports various exit codes
     // Tests multiple children with different exit codes sequentially
     for exit_code in [0, 1, 2, 42, 100, 127, 255] {
@@ -169,6 +185,7 @@ fn test_waitpid_multiple_exit_codes() {
 
 #[test]
 fn test_waitpid_signal_termination_sigkill() {
+    let _lock = test_lock();
     // Tests that waitpid correctly reports signal termination
     // Expected behavior:
     // 1. Child kills itself with SIGKILL
@@ -198,6 +215,7 @@ fn test_waitpid_signal_termination_sigkill() {
 
 #[test]
 fn test_waitpid_signal_termination_sigterm() {
+    let _lock = test_lock();
     // Tests that waitpid correctly reports SIGTERM termination
     match fork() {
         Ok(Fork::Parent(child)) => {
@@ -222,6 +240,7 @@ fn test_waitpid_signal_termination_sigterm() {
 
 #[test]
 fn test_waitpid_signal_termination_sigabrt() {
+    let _lock = test_lock();
     // Tests that waitpid correctly reports SIGABRT termination (abort)
     match fork() {
         Ok(Fork::Parent(child)) => {
@@ -245,6 +264,7 @@ fn test_waitpid_signal_termination_sigabrt() {
 
 #[test]
 fn test_waitpid_distinguishes_exit_vs_signal() {
+    let _lock = test_lock();
     // Tests that waitpid can distinguish between normal exit and signal termination
     // Expected behavior:
     // 1. First child exits normally with code 9
@@ -290,6 +310,7 @@ fn test_waitpid_distinguishes_exit_vs_signal() {
 
 #[test]
 fn test_waitpid_returns_raw_status() {
+    let _lock = test_lock();
     // Tests that waitpid returns the raw status code that can be inspected
     // Expected behavior:
     // 1. waitpid returns io::Result<c_int> (raw status)
@@ -316,6 +337,8 @@ fn test_waitpid_retries_on_eintr() {
     }
 
     static SIGNAL_RECEIVED: AtomicBool = AtomicBool::new(false);
+
+    let _lock = test_lock();
 
     // Reset between potential re-runs
     SIGNAL_RECEIVED.store(false, Ordering::SeqCst);
@@ -375,6 +398,7 @@ fn test_waitpid_retries_on_eintr() {
 
 #[test]
 fn test_waitpid_nohang_child_still_running() {
+    let _lock = test_lock();
     // Tests that waitpid_nohang returns None when child is still running
     // Expected behavior:
     // 1. Child sleeps for a while
@@ -410,6 +434,7 @@ fn test_waitpid_nohang_child_still_running() {
 
 #[test]
 fn test_waitpid_nohang_child_exited() {
+    let _lock = test_lock();
     // Tests that waitpid_nohang returns Some(status) when child has exited
     // Expected behavior:
     // 1. Child exits immediately
@@ -444,6 +469,7 @@ fn test_waitpid_nohang_child_exited() {
 
 #[test]
 fn test_waitpid_nohang_poll_until_exit() {
+    let _lock = test_lock();
     // Tests polling pattern with waitpid_nohang
     // Expected behavior:
     // 1. Parent polls child status in a loop
@@ -492,6 +518,7 @@ fn test_waitpid_nohang_poll_until_exit() {
 
 #[test]
 fn test_waitpid_nohang_invalid_pid() {
+    let _lock = test_lock();
     // Tests that waitpid_nohang returns error for invalid PID
     // Expected behavior:
     // 1. Call waitpid_nohang with non-existent PID
@@ -515,6 +542,7 @@ fn test_waitpid_nohang_invalid_pid() {
 
 #[test]
 fn test_waitpid_nohang_multiple_children() {
+    let _lock = test_lock();
     // Tests checking multiple children with waitpid_nohang
     // Expected behavior:
     // 1. Create 3 children that exit at different times
@@ -578,6 +606,7 @@ fn test_waitpid_nohang_multiple_children() {
 
 #[test]
 fn test_waitpid_nohang_returns_option() {
+    let _lock = test_lock();
     // Tests the return type of waitpid_nohang is Option<c_int>
     // Expected behavior:
     // 1. Verify type signature
@@ -607,6 +636,7 @@ fn test_waitpid_nohang_returns_option() {
 
 #[test]
 fn test_waitpid_nohang_vs_blocking() {
+    let _lock = test_lock();
     // Tests the difference between waitpid and waitpid_nohang
     // Expected behavior:
     // 1. waitpid_nohang returns immediately
@@ -654,6 +684,7 @@ fn test_waitpid_nohang_vs_blocking() {
 
 #[test]
 fn test_wait_any_returns_reaped_pid_and_status() {
+    let _lock = test_lock();
     // Tests that wait_any reports which child was reaped, not just its status.
     match fork() {
         Ok(Fork::Parent(child)) => {
@@ -670,6 +701,7 @@ fn test_wait_any_returns_reaped_pid_and_status() {
 
 #[test]
 fn test_wait_any_nohang_child_still_running() {
+    let _lock = test_lock();
     // Tests that wait_any_nohang returns None when children exist but none has exited.
     match fork() {
         Ok(Fork::Parent(child)) => {
@@ -698,6 +730,7 @@ fn test_wait_any_nohang_child_still_running() {
 
 #[test]
 fn test_wait_any_nohang_child_exited() {
+    let _lock = test_lock();
     // Tests that wait_any_nohang returns the exited child's PID and status.
     match fork() {
         Ok(Fork::Parent(child)) => {
@@ -724,6 +757,7 @@ fn test_wait_any_nohang_child_exited() {
 
 #[test]
 fn test_wait_any_nohang_multiple_children_identifies_each_reaped_child() {
+    let _lock = test_lock();
     // Tests the supervisor use-case: reap any exited child and map it back by PID.
     let mut expected = HashMap::new();
 
@@ -774,6 +808,7 @@ fn test_wait_any_nohang_multiple_children_identifies_each_reaped_child() {
 
 #[test]
 fn test_wait_any_nohang_echild_after_all_children_reaped() {
+    let _lock = test_lock();
     match fork() {
         Ok(Fork::Parent(_child)) => {
             let (_pid, status) = wait_any().expect("wait_any failed");

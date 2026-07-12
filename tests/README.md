@@ -4,7 +4,7 @@ This directory contains integration tests for the `fork` library. These tests ru
 
 ## Overview
 
-The integration tests are organized into nine files:
+The integration tests are organized into fourteen files:
 - **`daemon_tests.rs`** - Daemon functionality
 - **`fork_tests.rs`** - Fork/waitpid functionality
 - **`integration_tests.rs`** - Advanced patterns
@@ -14,9 +14,41 @@ The integration tests are organized into nine files:
 - **`pid_tests.rs`** - PID helper functions (getpid, getppid)
 - **`status_macro_tests.rs`** - Status macro re-exports
 - **`chdir_tests.rs`** - Comprehensive chdir() function tests
+- **`typed_process_tests.rs`** - Typed IDs, groups, signals, and child events
+- **`fd_tests.rs`** - Owned close-on-exec pipe and socket-pair primitives
+- **`prepared_command_tests.rs`** - Prepared fork/exec and descriptor contracts
+- **`checked_daemon_tests.rs`** - Checked detachment and startup handshake
 - **`common/mod.rs`** - Shared test utilities
 
 Comprehensive coverage of process management, daemon creation, stdio safety, fork patterns, exit status handling, non-blocking waits, PID helpers, status macros, directory operations, and error scenarios.
+
+### `typed_process_tests.rs` - Typed Supervisor Primitives
+
+Runs serially with bounded waits and cleanup guards. It covers checked fork
+results, exact exit events, stop/continue observation, single-process and group
+signal delivery, parent/child process-group setup, draining coalesced terminal
+events, and blocking wait retry after `EINTR`.
+
+### `fd_tests.rs` - Broker IPC Primitives
+
+Checks `FD_CLOEXEC`, one-way pipe data and EOF behavior, bidirectional socket
+pair data flow, and ownership-based descriptor closure.
+
+### `prepared_command_tests.rs` - Prepared Fork and Exec
+
+Checks exact exits, typed and reaped exec failures, environment and working
+directory materialization, stdout mapping, overlapping descriptor targets,
+explicit inheritance and close-action conflicts, closure of unintended
+non-CLOEXEC descriptors, numeric identity application, and new process-group
+setup, descendant cleanup, and default signal-mask/disposition reset.
+
+### `checked_daemon_tests.rs` - Checked Daemon Startup
+
+Checks readiness only after daemon initialization, failures before and after
+detachment, exact errno/stage reporting, dropped-notifier EOF, hard startup
+timeouts, bounded group cleanup, repeated `EINTR`, directory changes, explicit
+stdio redirection, and preserved descriptors. Every detached test process
+exits through `_exit` and the original test process verifies group cleanup.
 
 ## Test Files
 

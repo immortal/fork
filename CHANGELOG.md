@@ -1,3 +1,32 @@
+## 0.9.0
+
+### Added
+* Checked positive `ProcessId` and `ProcessGroupId` types.
+* `fork_process()` and `ProcessFork` for a typed parent-side fork result.
+* Explicit process-group creation, joining, inspection, and signal delivery.
+* Nonzero `Signal` with portable supervisor signal constants; signal zero is
+  not representable.
+* Typed `ChildEvent::{Exited, Signalled, Stopped, Continued}` collection through
+  blocking and nonblocking child-specific and any-child wait functions.
+* Serial native lifecycle tests covering exit, stop/continue, signal delivery,
+  process groups, event draining, cleanup, and `EINTR` retry.
+* Native FreeBSD lifecycle CI (latest release) alongside Linux and macOS.
+* Owned close-on-exec `Pipe` and `SocketPair` primitives for broker IPC and
+  exec-status handshakes, including descriptor flag and data-flow tests.
+* Additive `PreparedCommand` fork/exec API with precomputed arguments and
+  environment, bounded startup handshakes, explicit process groups, collision-
+  safe descriptor map/inherit/close actions, numeric identity transitions, and
+  unintended-descriptor closure.
+* Public API compatibility CI against the published `0.8.0` crate.
+* Additive checked double-fork daemon startup with a bounded readiness/failure
+  channel, preserved descriptors, explicit stdio policy, exact startup stages,
+  and residual cleanup ownership.
+* Default child signal-state reset for prepared exec and checked daemon paths,
+  with explicit opt-in inheritance.
+* Regression tests pinning the exact portable `Signal` constant values and the
+  behavioral compatibility of the pre-broker `fork`/`waitpid`/`waitpid_nohang`
+  path, plus a runnable `process_broker` example.
+
 ## 0.8.0
 
 ### Added

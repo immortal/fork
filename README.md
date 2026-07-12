@@ -30,7 +30,7 @@ Add `fork` to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-fork = "0.8.0"
+fork = "0.9.0"
 ```
 
 Or use cargo-add:
@@ -110,8 +110,126 @@ match fork() {
 
 ## API Overview
 
+### Typed Supervisor API
+
+Supervisors should prefer the additive typed API. `ProcessId` and
+`ProcessGroupId` accept only positive values, `Signal` cannot represent signal
+zero, and process versus process-group delivery are separate operations.
+
+```rust
+use fork::{ChildEvent, wait_any_event_nohang};
+
+while let Some(event) = wait_any_event_nohang()? {
+    match event {
+        ChildEvent::Exited { pid, code } => println!("{pid} exited with {code}"),
+        ChildEvent::Signalled { pid, signal } => {
+            println!("{pid} terminated by signal {signal}");
+        }
+        ChildEvent::Stopped { pid, signal } => {
+            println!("{pid} stopped by signal {signal}");
+        }
+        ChildEvent::Continued { pid } => println!("{pid} continued"),
+    }
+}
+# Ok::<(), std::io::Error>(())
+```
+
+The group helpers are explicit:
+
+- `create_current_process_group()` creates a group in the child after fork.
+- `create_process_group(process)` performs the matching parent-side operation
+  to close the fork/exec race.
+- `join_process_group(process, group)` joins another owned child.
+- `signal_process(process, signal)` targets exactly one PID.
+- `signal_process_group(group, signal)` targets every group member without
+  exposing the raw negative-PID `kill(2)` convention.
+- `wait_event*` and `wait_any_event*` report typed exit, signal, stop, and
+  continue events and retry `waitpid(2)` after `EINTR`.
+
+### Broker IPC
+
+`pipe_cloexec()` and `socket_pair_cloexec()` return owned endpoints and prevent
+them from leaking through a successful `exec`. A pipe is suitable for a
+one-way startup-status handshake; a socket pair supports bidirectional framed
+messages between a supervisor and its dedicated process broker.
+
+On Linux and the supported BSDs, close-on-exec is set atomically when each
+endpoint is created. macOS requires a `fcntl` fallback, so construct broker IPC
+before starting threads that could concurrently execute another program.
+
+### Prepared Fork and Exec
+
+`PreparedCommand` is an additive API for a dedicated, single-threaded process
+broker. It snapshots the environment and materializes the executable path,
+arguments, working directory, pointer arrays, process-group intent, descriptor
+mappings, descriptor close bounds, and numeric credentials before `fork`. The
+child then performs only reviewed system calls before `execve` or `_exit`.
+
+```rust
+use std::time::Duration;
+use fork::{PreparedCommand, ProcessGroup};
+
+let mut command = PreparedCommand::new("/bin/sleep")?;
+command.arg("5")?.process_group(ProcessGroup::New);
+let child = command.spawn(Duration::from_secs(3))?;
+println!("started {}", child.process());
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+The executable is direct: the library performs neither shell parsing nor
+`PATH` lookup. Descriptor sources are owned and duplicated above all targets
+before fork, so overlapping mappings cannot destroy another mapping's source.
+Descriptors can be mapped, inherited at their existing number, or explicitly
+closed; everything else above standard error is closed before exec. Optional
+identity transitions apply pre-resolved supplementary groups, primary GID, and
+UID in that order—the library never performs account-database lookup after
+fork. By default the child also clears its signal mask and restores portable
+catchable dispositions so ignored or blocked supervisor signals do not leak
+through exec. `ChildSignalState::Inherit` is an explicit opt-out.
+An internal close-on-exec pipe distinguishes successful `execve` from a typed
+pre-exec failure. The original low-level API remains unchanged.
+
+### Checked Daemon Startup
+
+`checked_daemon()` is the additive alternative when the invoking process must
+remain alive and learn whether daemon initialization really succeeded. Call it
+before creating threads. The intermediate child creates a session and performs
+the second fork; the detached grandchild initializes resources and then uses
+its `DaemonNotifier` to report ready or explicitly fail and exit.
+The detached daemon receives the same default signal-state reset before
+initialization; callers may explicitly request inheritance when necessary.
+
+```rust
+use std::time::Duration;
+use fork::{CheckedDaemon, DaemonOptions, checked_daemon};
+
+let mut options = DaemonOptions::new();
+options
+    .current_directory("/")?
+    .redirect_standard_io_to_null()?;
+
+match checked_daemon(options, Duration::from_secs(3))? {
+    CheckedDaemon::Parent(process) => {
+        println!("daemon {} is ready", process.process());
+    }
+    CheckedDaemon::Daemon(notifier) => {
+        // Bind sockets, acquire locks, create PID files, and initialize logs.
+        notifier.notify_ready()?;
+        // Start the daemon event loop here.
+    }
+}
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+The deadline covers partial records and repeated `EINTR`, not only the first
+pipe byte. Timeout and failure paths send `KILL`, reap the intermediate child,
+and return any process or group that could not be confirmed clean through
+`DaemonError::cleanup_pending()`. The existing `daemon()` behavior and
+signature are unchanged.
+
 ### Main Functions
 
+- **`fork_process()`** - Forks with a checked `ProcessId` in the parent
 - **`fork()`** - Creates a new child process
 - **`daemon(nochdir, noclose)`** - Creates a daemon using double-fork pattern
   - `nochdir`: if `false`, changes working directory to `/`
@@ -127,6 +245,10 @@ match fork() {
 - **`chdir()`** - Changes current directory to `/`
 - **`redirect_stdio()`** - Redirects stdin/stdout/stderr to `/dev/null` (recommended)
 - **`close_fd()`** - Closes stdin, stdout, and stderr (legacy, use `redirect_stdio()` instead)
+- **`pipe_cloexec()`** - Creates an owned close-on-exec unidirectional pipe
+- **`socket_pair_cloexec()`** - Creates an owned close-on-exec Unix socket pair
+- **`PreparedCommand`** - Materializes and directly executes a broker command
+- **`checked_daemon()`** - Performs checked, bounded double-fork detachment
 
 ### Status Inspection Macros (re-exported from libc)
 
@@ -199,28 +321,31 @@ This prevents the daemon from ever acquiring a controlling terminal.
 
 `daemon()` intentionally follows the classic daemon pattern: after the first
 fork succeeds, the original parent exits before later setup steps run. If the
-launcher must observe setup success or failure, build a readiness handshake
-around the primitives in this crate. The usual pattern is to create a pipe
-before forking, keep the original parent blocked on the read end, and have the
-daemon child write success or an errno-style failure before the parent exits.
+launcher must remain alive and observe setup success or failure, use
+`checked_daemon()` with an explicit timeout and `DaemonNotifier`. It preserves
+the existing `daemon()` contract while providing checked detachment without
+requiring each caller to implement its own wire protocol and cleanup path.
 
-See `examples/checked_daemon_pattern.rs` for a complete low-level example using
-`fork()`, `setsid()`, `chdir()`, `redirect_stdio()`, and a pre-fork pipe.
+See `examples/checked_daemon_pattern.rs` for a complete checked-startup example.
 
 ## Safety Notes
 
 - `daemon()` uses `_exit` in the forked parents to avoid running non-async-signal-safe destructors between fork/exec (POSIX-safe on Linux/macOS/BSD).
 - `redirect_stdio()` retries `open()` and `dup2()` on `EINTR`; `close_fd()` calls `close()` once and treats `EINTR` as success to avoid closing a reused fd.
 - Prefer `redirect_stdio()` over `close_fd()` so file descriptors 0,1,2 stay occupied (avoids accidental log/data corruption).
-- For supervisors, `HashMap` is appropriate: use raw PIDs or `Fork::Parent(pid)` as live child handles that are removed after reaping. Use your own monotonic id for durable state across restarts/history because operating systems reuse PIDs.
+- For supervisors, prefer `ProcessId` as a checked live handle and remove it
+  immediately after a terminal `ChildEvent`. Use your own monotonic identity for
+  durable restart/history state because operating systems reuse PIDs.
 
 ## Testing
 
 Run tests:
 
 ```bash
-cargo test
+cargo test --all-targets --all-features -- --test-threads=1
 ```
+
+The CI lifecycle suite runs natively on Linux, macOS, and FreeBSD.
 
 See [`tests/README.md`](tests/README.md) for detailed information about integration tests.
 
@@ -246,7 +371,7 @@ This library is designed for Unix-like operating systems:
 See the [`examples/`](examples/) directory for more usage examples:
 
 - `example_daemon.rs` - Daemon creation
-- `checked_daemon_pattern.rs` - Checked startup pattern with a pre-fork pipe
+- `checked_daemon_pattern.rs` - Bounded checked startup with explicit readiness
 - `example_pipe.rs` - Fork with pipe communication
 - `example_touch_pid.rs` - PID file creation
 

@@ -38,6 +38,19 @@ jobs:
       - name: Check
         run: cargo check
 
+  semver:
+    name: Public API compatibility
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-semver-checks
+
+      - name: Compare with published 0.8.0 API
+        run: cargo semver-checks --baseline-version 0.8.0
+
   test:
     name: Test
     strategy:
@@ -66,6 +79,20 @@ jobs:
           pkill -9 -f "fork.*debug/deps" || true
           # Clean up test directories
           rm -rf /tmp/fork_test* || true
+
+  freebsd-test:
+    name: Test FreeBSD
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Run native FreeBSD lifecycle suite
+        uses: vmactions/freebsd-vm@v1
+        with:
+          copyback: false
+          usesh: true
+          prepare: pkg install -y rust
+          run: cargo test --all-targets --all-features -- --test-threads=1
 
   coverage:
     name: Coverage

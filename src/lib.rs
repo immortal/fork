@@ -146,6 +146,105 @@
 //! # }
 //! ```
 //!
+//! ## Process Broker with Typed Events (Safe Supervisor)
+//!
+//! The safe broker API (`PreparedCommand` and `wait_any_event`) ensures that file descriptors are managed securely via close-on-exec, and provides rich typed events (`ChildEvent`) that clearly distinguish between termination and suspension without confusing integer logic.
+//!
+//! ```no_run
+//! use fork::{PreparedCommand, wait_any_event, ChildEvent, ProcessGroup};
+//!
+//! # fn main() -> std::io::Result<()> {
+//! // 1. Prepare a command that runs in its own process group
+//! let mut cmd = PreparedCommand::new("/bin/sleep")?;
+//! cmd.arg("3")?;
+//! cmd.process_group(ProcessGroup::New);
+//!
+//! // 2. Spawn the child (this ensures all strings, arrays, and descriptors
+//! //    are materialized safely before the fork)
+//! match cmd.spawn(std::time::Duration::from_secs(3)) {
+//!     Ok(child) => {
+//!         println!("Spawned child with PID: {}", child.process().get());
+//!         
+//!         // 3. Monitor using typed events
+//!         loop {
+//!             // Block until an event occurs
+//!             match wait_any_event() {
+//!                 Ok(event) => {
+//!                     match event {
+//!                         ChildEvent::Exited { pid, code } => {
+//!                             println!("PID {} exited with code {}", pid.get(), code);
+//!                             break;
+//!                         }
+//!                         ChildEvent::Signalled { pid, signal } => {
+//!                             println!("PID {} terminated by signal {}", pid.get(), signal);
+//!                             break;
+//!                         }
+//!                         ChildEvent::Stopped { pid, signal } => {
+//!                             println!("PID {} was stopped by {}", pid.get(), signal);
+//!                         }
+//!                         ChildEvent::Continued { pid } => {
+//!                             println!("PID {} continued", pid.get());
+//!                         }
+//!                     }
+//!                 }
+//!                 Err(e) => {
+//!                     eprintln!("Wait failed: {}", e);
+//!                     break;
+//!                 }
+//!             }
+//!         }
+//!     }
+//!     Err(e) => eprintln!("Failed to spawn child: {}", e),
+//! }
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! ## Checked Daemon Pattern
+//!
+//! Unlike a traditional "fire and forget" double-fork, the `checked_daemon` pattern allows the intermediate process to wait until the daemon has fully initialized its resources before returning success to the original caller.
+//!
+//! ```no_run
+//! use fork::{checked_daemon, DaemonOptions};
+//! use std::time::Duration;
+//!
+//! # fn main() -> std::io::Result<()> {
+//! // Set a timeout to prevent the original caller from hanging indefinitely
+//! // if the daemon gets stuck during initialization.
+//! let timeout = Duration::from_secs(5);
+//!
+//! match checked_daemon(DaemonOptions::new(), timeout) {
+//!     Ok(fork::CheckedDaemon::Parent(_)) => {
+//!         // The original invoker returns successfully ONLY after the daemon
+//!         // invokes `notifier.notify_ready()` below.
+//!         println!("Daemon started and initialized successfully.");
+//!     }
+//!     Ok(fork::CheckedDaemon::Daemon(notifier)) => {
+//!         // We are now the detached daemon process (session leader).
+//!         // Perform initialization (bind ports, allocate memory, etc.)
+//!         let initialized = true;
+//!
+//!         if initialized {
+//!             // Notify the parent that we've started successfully
+//!             let _ = notifier.notify_ready();
+//!             
+//!             // Run background service loop...
+//!             loop {
+//!                 std::thread::sleep(Duration::from_secs(60));
+//!             }
+//!         } else {
+//!             // If initialization fails, bubble the error back to the parent and exit
+//!             notifier.fail_and_exit(&std::io::Error::last_os_error());
+//!         }
+//!     }
+//!     Err(e) => {
+//!         eprintln!("Failed to launch daemon: {}", e);
+//!     }
+//! }
+//! # Ok(())
+//! # }
+//! ```
+//!
 //! # Safety and Best Practices
 //!
 //! - **Always check fork result** - Functions marked `#[must_use]` prevent accidents
@@ -168,6 +267,34 @@
 //! Windows is **not supported** as it lacks `fork()` system call.
 
 use std::io;
+
+mod child_signal;
+mod command;
+mod daemon;
+mod descriptor;
+mod fd;
+mod identity;
+mod raw;
+mod signal;
+mod wait;
+
+pub use child_signal::ChildSignalState;
+pub use command::{
+    PreparedCommand, ProcessCredentials, ProcessGroup, SpawnError, SpawnStage, SpawnedChild,
+    SupplementaryGroups,
+};
+pub use daemon::{
+    CheckedDaemon, DaemonCleanup, DaemonError, DaemonNotifier, DaemonOptions, DaemonProcess,
+    DaemonStage, checked_daemon,
+};
+pub use fd::{Pipe, SocketPair, pipe_cloexec, socket_pair_cloexec};
+pub use identity::{
+    InvalidProcessGroupId, InvalidProcessId, ProcessGroupId, ProcessId,
+    create_current_process_group, create_process_group, current_process_group_id,
+    current_process_id, join_process_group, process_group,
+};
+pub use signal::{InvalidSignal, Signal, signal_process, signal_process_group};
+pub use wait::{ChildEvent, wait_any_event, wait_any_event_nohang, wait_event, wait_event_nohang};
 
 // Re-export libc status inspection macros for convenience
 // This allows users to write `use fork::{waitpid, WIFEXITED, WEXITSTATUS}`
@@ -192,6 +319,13 @@ pub use libc::{WEXITSTATUS, WIFEXITED, WIFSIGNALED, WTERMSIG};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Fork {
     Parent(libc::pid_t),
+    Child,
+}
+
+/// Fork result with a checked process identifier in the parent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ProcessFork {
+    Parent(ProcessId),
     Child,
 }
 
@@ -286,6 +420,16 @@ impl Fork {
     pub const fn child_pid(&self) -> Option<libc::pid_t> {
         match self {
             Self::Parent(pid) => Some(*pid),
+            Self::Child => None,
+        }
+    }
+
+    /// Returns the checked child process identifier in the parent.
+    #[must_use]
+    #[inline]
+    pub const fn child_process_id(&self) -> Option<ProcessId> {
+        match self {
+            Self::Parent(pid) => ProcessId::new(*pid),
             Self::Child => None,
         }
     }
@@ -507,6 +651,26 @@ pub fn fork() -> io::Result<Fork> {
     }
 }
 
+/// Create a child and return a checked process identifier to the parent.
+///
+/// This is the preferred fork entry point for supervisors. Like [`fork`], it
+/// must be called before creating threads, and the child may perform only
+/// async-signal-safe operations before `exec` or `_exit`.
+///
+/// # Errors
+///
+/// Returns the operating-system `fork(2)` error or `InvalidData` if the kernel
+/// unexpectedly returns a nonpositive child PID to the parent.
+#[must_use = "fork result must be checked to determine parent/child"]
+pub fn fork_process() -> io::Result<ProcessFork> {
+    match fork()? {
+        Fork::Parent(raw) => ProcessId::try_from(raw)
+            .map(ProcessFork::Parent)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error)),
+        Fork::Child => Ok(ProcessFork::Child),
+    }
+}
+
 /// Wait for process to change status [see wait(2)](https://man.freebsd.org/cgi/man.cgi?waitpid)
 ///
 /// # Behavior
@@ -541,7 +705,7 @@ pub fn fork() -> io::Result<Fork> {
 ///}
 ///```
 pub fn waitpid(pid: libc::pid_t) -> io::Result<libc::c_int> {
-    waitpid_reaped(pid, 0).map(|(_, status)| status)
+    wait::waitpid_reaped(pid, 0).map(|(_, status)| status)
 }
 
 /// Wait for process to change status without blocking [see wait(2)](https://man.freebsd.org/cgi/man.cgi?waitpid)
@@ -610,7 +774,7 @@ pub fn waitpid(pid: libc::pid_t) -> io::Result<libc::c_int> {
 /// - No child process exists with the given PID (ECHILD)
 /// - Invalid options or PID
 pub fn waitpid_nohang(pid: libc::pid_t) -> io::Result<Option<libc::c_int>> {
-    waitpid_reaped_nohang(pid, libc::WNOHANG).map(|maybe_child| {
+    wait::waitpid_reaped_nohang(pid, libc::WNOHANG).map(|maybe_child| {
         maybe_child.map(|(_pid, status)| {
             // Child terminated (only WNOHANG is set, so stop/continue are not reported)
             status
@@ -664,7 +828,7 @@ pub fn waitpid_nohang(pid: libc::pid_t) -> io::Result<Option<libc::c_int>> {
 /// # Ok::<(), std::io::Error>(())
 /// ```
 pub fn wait_any() -> io::Result<(libc::pid_t, libc::c_int)> {
-    waitpid_reaped(-1, 0)
+    wait::waitpid_reaped(-1, 0)
 }
 
 /// Wait for any child process to terminate without blocking [see wait(2)](https://man.freebsd.org/cgi/man.cgi?waitpid)
@@ -731,58 +895,7 @@ pub fn wait_any() -> io::Result<(libc::pid_t, libc::c_int)> {
 /// # Ok::<(), std::io::Error>(())
 /// ```
 pub fn wait_any_nohang() -> io::Result<Option<(libc::pid_t, libc::c_int)>> {
-    waitpid_reaped_nohang(-1, libc::WNOHANG)
-}
-
-fn waitpid_reaped(
-    pid: libc::pid_t,
-    options: libc::c_int,
-) -> io::Result<(libc::pid_t, libc::c_int)> {
-    let mut status: libc::c_int = 0;
-    loop {
-        // SAFETY: &raw mut status provides a raw pointer to initialized memory
-        let res = unsafe { libc::waitpid(pid, &raw mut status, options) };
-
-        if res == -1 {
-            let err = io::Error::last_os_error();
-
-            if err.kind() == io::ErrorKind::Interrupted {
-                continue;
-            }
-
-            return Err(err);
-        }
-
-        return Ok((res, status));
-    }
-}
-
-fn waitpid_reaped_nohang(
-    pid: libc::pid_t,
-    options: libc::c_int,
-) -> io::Result<Option<(libc::pid_t, libc::c_int)>> {
-    let mut status: libc::c_int = 0;
-    loop {
-        // SAFETY: &raw mut status provides a raw pointer to initialized memory
-        let res = unsafe { libc::waitpid(pid, &raw mut status, options) };
-
-        if res == 0 {
-            // Child has not changed state (still running)
-            return Ok(None);
-        }
-
-        if res == -1 {
-            let err = io::Error::last_os_error();
-
-            if err.kind() == io::ErrorKind::Interrupted {
-                continue; // Retry on EINTR
-            }
-
-            return Err(err);
-        }
-
-        return Ok(Some((res, status)));
-    }
+    wait::waitpid_reaped_nohang(-1, libc::WNOHANG)
 }
 
 /// Create session and set process group ID [see setsid(2)](https://www.freebsd.org/cgi/man.cgi?setsid)
