@@ -125,4 +125,5 @@ jobs:
           flags: rust
 
       - name: Coveralls GitHub Action
+        continue-on-error: true
         uses: coverallsapp/github-action@v2
