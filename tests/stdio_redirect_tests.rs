@@ -14,6 +14,19 @@ use std::{fs::File, io::Write, os::unix::io::AsRawFd, process::exit};
 
 use fork::{Fork, close_fd, fork, waitpid};
 
+const FD_REUSE_FILES: [&str; 4] = [
+    "/tmp/fork_test_fd_marker.txt",
+    "/tmp/fork_test_fd1.txt",
+    "/tmp/fork_test_fd2.txt",
+    "/tmp/fork_test_fd3.txt",
+];
+
+fn remove_fd_reuse_files() {
+    for path in FD_REUSE_FILES {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
 /// Test that demonstrates the fd reuse bug with close_fd()
 ///
 /// This test SHOULD FAIL with current implementation because:
@@ -23,19 +36,22 @@ use fork::{Fork, close_fd, fork, waitpid};
 #[test]
 #[should_panic(expected = "File descriptors were reused")]
 fn test_close_fd_allows_fd_reuse() {
+    remove_fd_reuse_files();
+
     match fork() {
         Ok(Fork::Parent(child)) => {
             let result = waitpid(child);
             // If child exited with error, the bug exists
-            if result.is_err()
+            let descriptors_were_reused = result.is_err()
                 || std::fs::read_to_string("/tmp/fork_test_fd_marker.txt")
                     .unwrap_or_default()
-                    .contains("REUSED")
-            {
-                // Cleanup
-                let _ = std::fs::remove_file("/tmp/fork_test_fd_marker.txt");
-                panic!("File descriptors were reused (bug exists)");
-            }
+                    .contains("REUSED");
+            remove_fd_reuse_files();
+
+            assert!(
+                !descriptors_were_reused,
+                "File descriptors were reused (bug exists)"
+            );
         }
         Ok(Fork::Child) => {
             // Close stdio

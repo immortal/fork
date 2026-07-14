@@ -273,6 +273,7 @@ mod command;
 mod daemon;
 mod descriptor;
 mod fd;
+mod group_guard;
 mod identity;
 mod raw;
 mod signal;
@@ -288,6 +289,7 @@ pub use daemon::{
     DaemonStage, checked_daemon,
 };
 pub use fd::{Pipe, SocketPair, pipe_cloexec, socket_pair_cloexec};
+pub use group_guard::ProcessGroupGuard;
 pub use identity::{
     InvalidProcessGroupId, InvalidProcessId, ProcessGroupId, ProcessId,
     create_current_process_group, create_process_group, current_process_group_id,

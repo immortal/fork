@@ -351,13 +351,13 @@ fn explicitly_inherited_descriptor_keeps_its_number() -> Result<(), Box<dyn Erro
 fn mapped_and_closed_descriptor_actions_cannot_conflict() -> Result<(), Box<dyn Error>> {
     let first = pipe_cloexec()?;
     let (_, first_writer) = first.into_parts();
-    let mut mapped_first = PreparedCommand::new("/bin/true")?;
+    let mut mapped_first = PreparedCommand::new("/bin/sh")?;
     mapped_first.map_descriptor(first_writer, libc::STDOUT_FILENO)?;
     assert!(mapped_first.close_descriptor(libc::STDOUT_FILENO).is_err());
 
     let second = pipe_cloexec()?;
     let (_, second_writer) = second.into_parts();
-    let mut closed_first = PreparedCommand::new("/bin/true")?;
+    let mut closed_first = PreparedCommand::new("/bin/sh")?;
     closed_first.close_descriptor(libc::STDERR_FILENO)?;
     assert!(
         closed_first

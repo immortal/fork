@@ -32,7 +32,7 @@ use std::{
 
 use fork::{Fork, fork, waitpid};
 
-use common::{get_test_dir, setup_test_dir};
+use common::{get_test_dir, get_unique_test_dir, setup_test_dir};
 
 #[test]
 // Tests basic fork() functionality with waitpid()
@@ -178,8 +178,7 @@ fn test_fork_child_inherits_environment() {
 
 #[test]
 fn test_fork_child_can_execute_commands() {
-    let test_dir = get_test_dir("fork");
-    fs::create_dir_all(&test_dir).expect("Failed to create test directory");
+    let test_dir = setup_test_dir(get_unique_test_dir("fork_command"));
     let output_file = test_dir.join("command_output.txt");
 
     match fork() {
@@ -218,8 +217,7 @@ fn test_fork_child_can_execute_commands() {
 
 #[test]
 fn test_fork_child_has_different_pid() {
-    let test_dir = get_test_dir("fork");
-    fs::create_dir_all(&test_dir).expect("Failed to create test directory");
+    let test_dir = setup_test_dir(get_unique_test_dir("fork_pid"));
     let pid_file = test_dir.join("pids.txt");
 
     let parent_pid = unsafe { libc::getpid() };
@@ -263,8 +261,7 @@ fn test_fork_child_has_different_pid() {
 
 #[test]
 fn test_waitpid_waits_for_child() {
-    let test_dir = get_test_dir("fork");
-    fs::create_dir_all(&test_dir).expect("Failed to create test directory");
+    let test_dir = setup_test_dir(get_unique_test_dir("fork_wait"));
     let marker_file = test_dir.join("wait_marker.txt");
 
     match fork() {

@@ -30,7 +30,7 @@ Add `fork` to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-fork = "0.9.0"
+fork = "0.9.1"
 ```
 
 Or use cargo-add:
@@ -145,6 +145,107 @@ The group helpers are explicit:
   exposing the raw negative-PID `kill(2)` convention.
 - `wait_event*` and `wait_any_event*` report typed exit, signal, stop, and
   continue events and retry `waitpid(2)` after `EINTR`.
+
+### Fail-closed Process Groups
+
+#### The problem it solves
+
+A supervisor normally stops a service by sending a signal and waiting for it.
+That works only while the process responsible for cleanup is alive. If a
+process broker is killed with `SIGKILL`, crashes, or is terminated by the
+out-of-memory killer, it cannot run a destructor or an async cleanup task. The
+service may therefore continue running without its owner.
+
+Waiting for another process to notice a closed IPC connection is not
+equivalent: the broker can die before publishing the new process-group ID, and
+a numeric ID may be reused before delayed cleanup reaches it.
+`ProcessGroupGuard` makes the cleanup authority exist before the workload
+starts and keeps it beside—not inside—the workload group.
+
+```text
+ Tokio supervisor
+        │ broker IPC
+        ▼
+ single-threaded broker ─── owner socket ─── guard helper
+        │                                      │
+        │ spawns into reserved group           │ unexpected EOF
+        ▼                                      │ sends SIGKILL
+ process group ◄───────────────────────────────┘
+   └── workload process(es)
+```
+
+The broker owns the socket endpoint and the `ProcessGroupGuard` value. The
+helper owns the other endpoint and deliberately remains outside the workload
+group. The kernel closes the broker endpoint even after `SIGKILL`; the helper
+observes EOF and kills the complete group. During a clean shutdown, `disarm`
+sends an explicit record instead, so the helper exits without signaling the
+workload.
+
+#### Typical lifecycle
+
+```rust,no_run
+use std::time::Duration;
+
+use fork::{PreparedCommand, ProcessGroup, ProcessGroupGuard, wait_event};
+
+let timeout = Duration::from_secs(3);
+let mut guard = ProcessGroupGuard::new()?;
+
+let mut command = PreparedCommand::new("/bin/sleep")?;
+command
+    .arg("5")?
+    .process_group(ProcessGroup::Join(guard.process_group()));
+let child = command.spawn(timeout)?;
+
+// The workload has joined, so the temporary group anchor can retire.
+guard.activate(timeout)?;
+let event = wait_event(child.process())?;
+
+// Normal completion: reap the helper without signaling the now-empty group.
+guard.disarm(timeout)?;
+println!("workload finished: {event:?}");
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+The repository includes this lifecycle as the runnable
+`process_group_guard` example.
+
+Internally, `new` first creates a short-lived anchor which reserves a valid
+process-group ID, then creates the out-of-group guard. The caller starts the
+workload in that reserved group and calls `activate`, which retires and reaps
+the anchor. One guard helper and one close-on-exec socket remain for the active
+group. Dropping an armed guard is fail-closed: it closes the endpoint, lets the
+helper kill the group, and performs bounded helper cleanup.
+
+#### Ownership and limits
+
+- Use this API in a dedicated single-threaded process broker, before starting a
+  multithreaded runtime. It intentionally has no Tokio dependency, shared lock,
+  or `Arc`.
+- The broker must exclusively own and serialize collection of its direct-child
+  events. `guard_process` exists so an all-child wait loop can classify an
+  unexpected helper event; such an event means containment has failed and the
+  broker must kill the affected group.
+- Startup performs two helper forks. `activate` removes the anchor, leaving one
+  sleeping helper process and one socket endpoint per active group. The helper
+  blocks in `read` and consumes no scheduled CPU while healthy, but one process
+  per group is still a real capacity cost for high-cardinality supervisors.
+- Helper children allocate no shared state and retain only their guard
+  descriptor. Linux and FreeBSD close inherited descriptors with
+  `close_range`; the portable fallback scans up to the soft descriptor limit.
+  Parent cleanup briefly yields, then uses bounded exponential sleeps capped at
+  five milliseconds rather than busy polling.
+- `activate` and `disarm` use caller-supplied nonzero cleanup deadlines. The
+  fail-closed `Drop` fallback can block for up to three seconds while reaping a
+  defective helper.
+- Disarm immediately after reaping the final owned group member. Portable Unix
+  exposes only a numeric ID for an empty process group; it provides no handle
+  which prevents that ID from later being reused. An armed guard must never be
+  retained as authority over an already-empty group.
+- The portable boundary is the process group, not every possible descendant.
+  A workload which calls `setsid` or joins another group has escaped. Use an
+  operating-system-specific facility such as a FreeBSD process reaper or Linux
+  cgroup when stronger containment is required.
 
 ### Broker IPC
 

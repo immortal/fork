@@ -14,10 +14,14 @@
 #![allow(clippy::panic)]
 #![allow(clippy::match_wild_err_arm)]
 
+mod common;
+
 use std::process::exit;
 
 // Import macros from fork crate (not libc)
 use fork::{Fork, WEXITSTATUS, WIFEXITED, WIFSIGNALED, WTERMSIG, fork, waitpid};
+
+use common::disable_core_dumps;
 
 #[test]
 fn test_wifexited_macro_works() {
@@ -214,6 +218,7 @@ fn test_macros_distinguish_exit_vs_signal() {
             assert_eq!(WTERMSIG(status), libc::SIGABRT, "Signal should be SIGABRT");
         }
         Ok(Fork::Child) => {
+            disable_core_dumps();
             unsafe {
                 libc::raise(libc::SIGABRT);
             }

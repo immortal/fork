@@ -169,6 +169,26 @@ impl Prepared {
     }
 }
 
+#[derive(Debug)]
+pub(crate) struct GuardPrepared {
+    allowed: RawFd,
+    close_limit: RawFd,
+}
+
+impl GuardPrepared {
+    pub(crate) fn new(allowed: &OwnedFd) -> io::Result<Self> {
+        Ok(Self {
+            allowed: allowed.as_raw_fd(),
+            close_limit: descriptor_close_limit()?,
+        })
+    }
+
+    /// Close every descriptor except the guard's owner-lifetime reader.
+    pub(crate) fn apply_in_child(&self) {
+        close_unintended_from(&[self.allowed], 0, self.close_limit);
+    }
+}
+
 fn duplicate_cloexec(source: &OwnedFd, minimum: RawFd) -> io::Result<OwnedFd> {
     loop {
         // SAFETY: source is live and F_DUPFD_CLOEXEC returns a newly owned fd.
@@ -193,7 +213,17 @@ fn descriptor_close_limit() -> io::Result<RawFd> {
     if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &raw mut limit) } == -1 {
         return Err(io::Error::last_os_error());
     }
-    Ok(limit.rlim_cur.min(libc::c_int::MAX as libc::rlim_t) as RawFd)
+    bounded_descriptor_limit(limit.rlim_cur)
+}
+
+fn bounded_descriptor_limit(limit: libc::rlim_t) -> io::Result<RawFd> {
+    let bounded = i128::from(limit).min(i128::from(libc::c_int::MAX));
+    RawFd::try_from(bounded).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "the bounded descriptor limit does not fit in RawFd",
+        )
+    })
 }
 
 fn duplicate_to(source: RawFd, target: RawFd) -> Result<(), libc::c_int> {
@@ -210,10 +240,14 @@ fn duplicate_to(source: RawFd, target: RawFd) -> Result<(), libc::c_int> {
 }
 
 fn close_unintended(allowed: &[RawFd], close_limit: RawFd) {
-    if close_with_ranges(allowed) {
+    close_unintended_from(allowed, FIRST_NON_STDIO_FD, close_limit);
+}
+
+fn close_unintended_from(allowed: &[RawFd], first: RawFd, close_limit: RawFd) {
+    if close_with_ranges(allowed, first) {
         return;
     }
-    for descriptor in FIRST_NON_STDIO_FD..close_limit {
+    for descriptor in first..close_limit {
         if allowed.binary_search(&descriptor).is_err() {
             close_raw(descriptor);
         }
@@ -221,24 +255,20 @@ fn close_unintended(allowed: &[RawFd], close_limit: RawFd) {
 }
 
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-fn close_with_ranges(allowed: &[RawFd]) -> bool {
-    let mut first = FIRST_NON_STDIO_FD as libc::c_uint;
-    for descriptor in allowed
-        .iter()
-        .copied()
-        .filter(|fd| *fd >= FIRST_NON_STDIO_FD)
-    {
+fn close_with_ranges(allowed: &[RawFd], first: RawFd) -> bool {
+    let mut range_start = first.cast_unsigned();
+    for descriptor in allowed.iter().copied().filter(|fd| *fd >= first) {
         let descriptor = descriptor.cast_unsigned();
-        if first < descriptor && close_range(first, descriptor - 1) == -1 {
+        if range_start < descriptor && close_range(range_start, descriptor - 1) == -1 {
             return false;
         }
-        first = descriptor.saturating_add(1);
+        range_start = descriptor.saturating_add(1);
     }
-    first > libc::c_uint::MAX - 1 || close_range(first, libc::c_uint::MAX) == 0
+    range_start > libc::c_uint::MAX - 1 || close_range(range_start, libc::c_uint::MAX) == 0
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
-const fn close_with_ranges(_allowed: &[RawFd]) -> bool {
+const fn close_with_ranges(_allowed: &[RawFd], _first: RawFd) -> bool {
     false
 }
 
@@ -263,5 +293,19 @@ pub(crate) fn close_raw(descriptor: RawFd) {
     // SAFETY: closing an inherited raw descriptor is the intended child action.
     unsafe {
         libc::close(descriptor);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::bounded_descriptor_limit;
+
+    #[test]
+    fn bounded_descriptor_limit_saturates_at_raw_fd_max() {
+        assert!(matches!(bounded_descriptor_limit(0), Ok(0)));
+        assert!(matches!(
+            bounded_descriptor_limit(libc::rlim_t::MAX),
+            Ok(value) if value == libc::c_int::MAX
+        ));
     }
 }

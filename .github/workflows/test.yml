@@ -12,7 +12,7 @@ jobs:
     name: Format
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Format
@@ -22,34 +22,68 @@ jobs:
     name: Clippy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Clippy
-        run: cargo clippy --all-targets --all-features
+        run: cargo clippy --all-targets --all-features --locked -- -D warnings
 
   check:
     name: Check
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Check
-        run: cargo check
+        run: cargo check --all-targets --all-features --locked
+
+  docs:
+    name: Documentation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build API documentation
+        run: cargo doc --no-deps --all-features --locked
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+      - name: Test API examples
+        run: cargo test --doc --all-features --locked
 
   semver:
     name: Public API compatibility
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-semver-checks
 
-      - name: Compare with published 0.8.0 API
-        run: cargo semver-checks --baseline-version 0.8.0
+      - name: Compare with published 0.9.0 API
+        run: cargo semver-checks --baseline-version 0.9.0
+
+  policy:
+    name: Dependency policy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+
+      - name: Security advisories
+        run: cargo audit
+
+      - name: Licenses, sources, and duplicates
+        run: cargo deny --all-features check
 
   test:
     name: Test
@@ -66,11 +100,15 @@ jobs:
       - lint
       - check
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
 
       - name: test
-        run: RUST_TEST_THREADS=1 cargo test
+        run: cargo test --all-targets --all-features --locked -- --test-threads=1
+
+      - name: Verify test cleanup
+        if: always()
+        run: sh .github/scripts/check-test-cleanup.sh
 
       - name: Cleanup orphaned test processes
         if: always()
@@ -84,7 +122,7 @@ jobs:
     name: Test FreeBSD
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Run native FreeBSD lifecycle suite
         uses: vmactions/freebsd-vm@v1
@@ -92,7 +130,12 @@ jobs:
           copyback: false
           usesh: true
           prepare: pkg install -y rust
-          run: cargo test --all-targets --all-features -- --test-threads=1
+          run: |
+            set -eu
+            cargo clippy --all-targets --all-features --locked -- -D warnings
+            cargo test --all-targets --all-features --locked -- --test-threads=1
+            sh .github/scripts/check-test-cleanup.sh
+            cargo package --locked
 
   coverage:
     name: Coverage
@@ -102,7 +145,7 @@ jobs:
       - lint
       - check
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: llvm-tools-preview
@@ -114,7 +157,7 @@ jobs:
 
       - name: Generate coverage (lcov)
         run: |
-          RUST_TEST_THREADS=1 cargo llvm-cov --all-features --workspace --lcov --output-path coverage.lcov
+          cargo llvm-cov --all-features --workspace --locked --fail-under-lines 60 --lcov --output-path coverage.lcov -- --test-threads=1
 
       - name: Upload to codecov.io
         uses: codecov/codecov-action@v5

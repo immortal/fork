@@ -4,7 +4,7 @@ This directory contains integration tests for the `fork` library. These tests ru
 
 ## Overview
 
-The integration tests are organized into fourteen files:
+The integration contracts are organized by behavior:
 - **`daemon_tests.rs`** - Daemon functionality
 - **`fork_tests.rs`** - Fork/waitpid functionality
 - **`integration_tests.rs`** - Advanced patterns
@@ -18,6 +18,10 @@ The integration tests are organized into fourteen files:
 - **`fd_tests.rs`** - Owned close-on-exec pipe and socket-pair primitives
 - **`prepared_command_tests.rs`** - Prepared fork/exec and descriptor contracts
 - **`checked_daemon_tests.rs`** - Checked detachment and startup handshake
+- **`group_guard_tests.rs`** - Process-group guard lifecycle and failure paths
+- **`broker_owner_loss.rs`** - Harness-free forced broker-death containment
+- **`api_compat_tests.rs`** - Published API behavior compatibility
+- **`signal_constants_tests.rs`** - Portable signal-value contracts
 - **`common/mod.rs`** - Shared test utilities
 
 Comprehensive coverage of process management, daemon creation, stdio safety, fork patterns, exit status handling, non-blocking waits, PID helpers, status macros, directory operations, and error scenarios.
@@ -49,6 +53,22 @@ detachment, exact errno/stage reporting, dropped-notifier EOF, hard startup
 timeouts, bounded group cleanup, repeated `EINTR`, directory changes, explicit
 stdio redirection, and preserved descriptors. Every detached test process
 exits through `_exit` and the original test process verifies group cleanup.
+
+### `group_guard_tests.rs` - Fail-closed Process Groups
+
+Runs the guard lifecycle serially with deadlines and cleanup ownership. It
+covers running and stopped workloads, `TERM`/`STOP`/`CONT`/`KILL` isolation,
+clean disarm, invalid timeouts, repeated activation, failed exec, empty-group
+cleanup, unrelated and standard descriptor closure, dead and stopped helpers,
+and deliberate session escape.
+
+### `broker_owner_loss.rs` - Forced Broker Death
+
+Runs without the multithreaded Rust test harness. It kills a single-threaded
+broker with `SIGKILL` both before workload creation and after a guarded workload
+starts. The parent proves that startup helpers disappear and that the workload
+lifetime descriptor closes, so neither result can depend on broker destructors
+or async cleanup.
 
 ## Test Files
 
@@ -279,7 +299,9 @@ This makes it easy to:
 
 ## Test Isolation
 
-Each test uses a unique temporary directory to prevent conflicts when running in parallel:
+Filesystem tests use unique temporary directories. Native lifecycle CI also
+sets `RUST_TEST_THREADS=1` because child ownership and all-child wait operations
+must not race across tests:
 
 ```rust
 // Daemon tests use atomic counter for uniqueness
@@ -292,7 +314,8 @@ let test_dir = setup_test_dir(get_test_dir("fork_communication"));
 let test_dir = setup_test_dir(get_test_dir("int_double_fork"));
 ```
 
-This allows tests to run in parallel without interfering with each other.
+The harness-free broker-death contract starts no test-harness threads before it
+forks.
 
 ## Coverage
 
@@ -319,15 +342,23 @@ Integration tests provide coverage for:
 ```
 tests/
 ├── common/
-│   └── mod.rs               # Shared utilities (51 lines)
-├── daemon_tests.rs          # Daemon tests (271 lines, 6 tests)
-├── fork_tests.rs            # Fork tests (301 lines, 7 tests)
-├── integration_tests.rs     # Advanced tests (284 lines, 7 tests)
-├── stdio_redirect_tests.rs  # Stdio safety tests (313 lines, 7 tests)
-├── waitpid_tests.rs         # Waitpid tests (794 lines, 25 tests)
-├── error_handling_tests.rs  # Error tests (260 lines, 9 tests)
-├── pid_tests.rs             # PID helper tests (252 lines, 10 tests)
-├── status_macro_tests.rs    # Status macro tests (211 lines, 8 tests)
-├── chdir_tests.rs           # chdir tests (346 lines, 12 tests)
+│   └── mod.rs               # Shared utilities
+├── broker_owner_loss.rs     # Harness-free broker SIGKILL contract
+├── group_guard_tests.rs     # Guard lifecycle and failure contracts
+├── checked_daemon_tests.rs  # Checked daemon startup
+├── prepared_command_tests.rs # Prepared fork/exec
+├── typed_process_tests.rs   # Typed process lifecycle
+├── fd_tests.rs              # Owned descriptor primitives
+├── daemon_tests.rs          # Daemon behavior
+├── fork_tests.rs            # Fork/waitpid behavior
+├── integration_tests.rs     # Combined Unix patterns
+├── stdio_redirect_tests.rs  # Stdio safety
+├── waitpid_tests.rs         # Wait status behavior
+├── error_handling_tests.rs  # Error contracts
+├── pid_tests.rs             # PID helpers
+├── status_macro_tests.rs    # Status re-exports
+├── signal_constants_tests.rs # Portable signal constants
+├── api_compat_tests.rs      # Published API behavior
+├── chdir_tests.rs           # Working-directory behavior
 └── README.md                # This file
 ```

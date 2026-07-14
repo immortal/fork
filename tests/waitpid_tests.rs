@@ -17,6 +17,8 @@
 #![allow(clippy::uninlined_format_args)]
 #![allow(clippy::indexing_slicing)]
 
+mod common;
+
 use fork::{Fork, fork, wait_any, wait_any_nohang, waitpid, waitpid_nohang};
 use libc::{WEXITSTATUS, WIFEXITED, WIFSIGNALED, WTERMSIG};
 use std::{
@@ -29,6 +31,8 @@ use std::{
     thread,
     time::Duration,
 };
+
+use common::disable_core_dumps;
 
 static TEST_SERIAL: Mutex<()> = Mutex::new(());
 
@@ -253,6 +257,7 @@ fn test_waitpid_signal_termination_sigabrt() {
         }
         Ok(Fork::Child) => {
             // Abort
+            disable_core_dumps();
             unsafe {
                 libc::abort();
             }

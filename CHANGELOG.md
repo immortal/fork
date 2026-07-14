@@ -1,3 +1,38 @@
+## 0.9.1
+
+### Added
+* Additive `ProcessGroupGuard` for fail-closed process-group owner loss, with a
+  startup anchor, explicit disarm, bounded helper cleanup, descriptor isolation,
+  running/stopped workload contracts, and an explicit session-escape boundary.
+* Signal-safe disarm over a CLOEXEC Unix socket with `MSG_NOSIGNAL`, plus an
+  adaptive bounded helper wait which avoids both fixed startup delay and busy
+  polling.
+* Standalone single-threaded contracts which kill the owning broker with
+  `SIGKILL` before and after workload startup, proving that helpers and the
+  workload disappear without Rust destructors, async cleanup, or inherited
+  descriptors.
+
+### Safety
+* Helper cleanup never signals a numeric PID after a terminal event was reaped
+  or direct-child ownership can no longer be proven, preventing cleanup from
+  targeting a reused PID.
+* Workload `TERM`, `STOP`, `CONT`, and `KILL` delivery cannot disable the
+  out-of-group helper. Invalid deadlines, failed exec, dead or stopped helpers,
+  closed standard descriptors, and deliberate session escape have bounded
+  regression contracts.
+* The API documents exclusive child-reaping ownership and immediate disarm
+  after the final group member exits, because portable Unix cannot pin an empty
+  numeric process-group ID against reuse.
+* Descriptor scan bounds now use checked conversions across signed FreeBSD and
+  unsigned Linux `rlim_t` definitions.
+* Process tests own and remove their temporary files, suppress core generation
+  for intentional `SIGABRT` cases, and fail CI if an artifact or test process
+  survives the suite.
+
+### Compatibility
+* This release only adds public API. Existing `0.9.0` callers remain source
+  compatible.
+
 ## 0.9.0
 
 ### Added
