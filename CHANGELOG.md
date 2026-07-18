@@ -1,3 +1,27 @@
+## 0.10.0
+
+### Added
+* `acquire_subreaper`, `release_subreaper`, and `is_subreaper` let a supervisor
+  that is not PID 1 adopt orphaned descendants so the `wait_any_*` families can
+  observe and reap their terminal state. Acquisition and release are idempotent.
+  The role is process-global, is not inherited across `fork`, and is preserved
+  across `exec`.
+* Linux support via `PR_SET_CHILD_SUBREAPER`/`PR_GET_CHILD_SUBREAPER` and FreeBSD
+  support via `PROC_REAP_ACQUIRE`/`PROC_REAP_RELEASE`/`PROC_REAP_STATUS`. All
+  three functions return `ErrorKind::Unsupported` on other targets.
+* Standalone harness-free lifecycle contract covering state transitions, `fork`
+  non-inheritance, `exec` preservation, and orphan adoption.
+
+### Safety
+* Platform system calls are isolated in a private module and every failure is
+  converted through `io::Error::last_os_error`.
+* FreeBSD acquisition normalizes `EBUSY` (already a reaper) to success, and
+  `is_subreaper` excludes PID 1's implicit `REAPER_STATUS_REALINIT` role so the
+  query reflects only an explicitly acquired attribute, matching Linux.
+* Adoption observes and reaps orphaned descendants only; it does not enumerate or
+  signal still-running descendants that escape an owned process group, so
+  `wait_any_*` may report PIDs the supervisor did not spawn directly.
+
 ## 0.9.1
 
 ### Added

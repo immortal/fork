@@ -314,8 +314,8 @@ let test_dir = setup_test_dir(get_test_dir("fork_communication"));
 let test_dir = setup_test_dir(get_test_dir("int_double_fork"));
 ```
 
-The harness-free broker-death contract starts no test-harness threads before it
-forks.
+The harness-free broker-death and subreaper contracts start no test-harness
+threads before they fork.
 
 ## Coverage
 
@@ -335,6 +335,7 @@ Integration tests provide coverage for:
 - **Error scenarios** - ECHILD, EPERM, and invalid input handling
 - **Type safety** - io::Error verification and error kind matching
 - **Fork helper methods** - is_parent(), is_child(), child_pid()
+- **Subreaper lifecycle** - State, fork/exec behavior, and orphan adoption
 
 
 ## Module Structure
@@ -344,6 +345,7 @@ tests/
 ├── common/
 │   └── mod.rs               # Shared utilities
 ├── broker_owner_loss.rs     # Harness-free broker SIGKILL contract
+├── subreaper.rs             # Harness-free orphan-adoption contract
 ├── group_guard_tests.rs     # Guard lifecycle and failure contracts
 ├── checked_daemon_tests.rs  # Checked daemon startup
 ├── prepared_command_tests.rs # Prepared fork/exec

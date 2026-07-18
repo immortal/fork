@@ -5,6 +5,7 @@ use std::{
     fs::File,
     io::{self, BufRead, BufReader, Read},
     os::fd::{AsRawFd, FromRawFd, OwnedFd},
+    sync::{Mutex, MutexGuard},
     thread,
     time::{Duration, Instant},
 };
@@ -16,6 +17,17 @@ use fork::{
 };
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Serializes tests that own child processes so the parallel harness cannot let
+/// one test reap another's child through the process-global `wait_any_*` family.
+static TEST_SERIAL: Mutex<()> = Mutex::new(());
+
+/// Acquire the shared serialization guard for a child-owning test.
+fn test_lock() -> io::Result<MutexGuard<'static, ()>> {
+    TEST_SERIAL
+        .lock()
+        .map_err(|_| io::Error::other("prepared command test lock poisoned"))
+}
 
 struct ChildGuard {
     process: ProcessId,
@@ -95,6 +107,7 @@ impl Drop for ChildGuard {
 
 #[test]
 fn prepared_command_reports_exact_exit() -> Result<(), Box<dyn Error>> {
+    let _lock = test_lock()?;
     let mut command = PreparedCommand::new("/bin/sh")?;
     command.arg("-c")?.arg("exit 23")?;
 
@@ -113,6 +126,7 @@ fn prepared_command_reports_exact_exit() -> Result<(), Box<dyn Error>> {
 
 #[test]
 fn exec_failure_is_typed_and_child_is_reaped() -> Result<(), Box<dyn Error>> {
+    let _lock = test_lock()?;
     let command = PreparedCommand::new("/definitely/not/an/immortal-executable")?;
     match command.spawn(STARTUP_TIMEOUT) {
         Err(SpawnError::OperatingSystem {
@@ -145,6 +159,7 @@ fn exec_failure_is_typed_and_child_is_reaped() -> Result<(), Box<dyn Error>> {
 
 #[test]
 fn environment_directory_and_stdout_mapping_are_materialized() -> Result<(), Box<dyn Error>> {
+    let _lock = test_lock()?;
     // Resolve symlinks so the expected value matches the shell's `$PWD`, which
     // is derived from `getcwd(3)` and is therefore canonical. On macOS `/tmp`
     // is a symlink to `/private/tmp`, so a literal comparison would fail there.
@@ -176,6 +191,7 @@ fn environment_directory_and_stdout_mapping_are_materialized() -> Result<(), Box
 
 #[test]
 fn stdout_and_stderr_are_redirected_independently() -> Result<(), Box<dyn Error>> {
+    let _lock = test_lock()?;
     let stdout_pipe = pipe_cloexec()?;
     let stderr_pipe = pipe_cloexec()?;
     let (stdout_reader, stdout_writer) = stdout_pipe.into_parts();
@@ -202,6 +218,7 @@ fn stdout_and_stderr_are_redirected_independently() -> Result<(), Box<dyn Error>
 
 #[test]
 fn overlapping_descriptor_mappings_preserve_both_sources() -> Result<(), Box<dyn Error>> {
+    let _lock = test_lock()?;
     let first_pipe = pipe_cloexec()?;
     let second_pipe = pipe_cloexec()?;
     let (first_reader, first_writer) = first_pipe.into_parts();
@@ -233,6 +250,7 @@ fn overlapping_descriptor_mappings_preserve_both_sources() -> Result<(), Box<dyn
 
 #[test]
 fn unintended_non_cloexec_descriptor_is_closed_before_exec() -> Result<(), Box<dyn Error>> {
+    let _lock = test_lock()?;
     let source = File::open("/dev/null")?;
     // SAFETY: F_DUPFD returns a distinct descriptor owned by this test.
     let leaked_raw = unsafe { libc::fcntl(source.as_raw_fd(), libc::F_DUPFD, 64) };
@@ -262,6 +280,7 @@ fn unintended_non_cloexec_descriptor_is_closed_before_exec() -> Result<(), Box<d
 
 #[test]
 fn new_process_group_is_created_before_exec() -> Result<(), Box<dyn Error>> {
+    let _lock = test_lock()?;
     let mut command = PreparedCommand::new("/bin/sleep")?;
     command.arg("30")?.process_group(ProcessGroup::New);
     let child = command.spawn(STARTUP_TIMEOUT)?;
@@ -285,6 +304,7 @@ fn new_process_group_is_created_before_exec() -> Result<(), Box<dyn Error>> {
 
 #[test]
 fn owned_group_signal_removes_remaining_descendants() -> Result<(), Box<dyn Error>> {
+    let _lock = test_lock()?;
     let pipe = pipe_cloexec()?;
     let (reader, writer) = pipe.into_parts();
     let report_fd = writer.as_raw_fd();
@@ -328,6 +348,7 @@ fn owned_group_signal_removes_remaining_descendants() -> Result<(), Box<dyn Erro
 
 #[test]
 fn explicitly_inherited_descriptor_keeps_its_number() -> Result<(), Box<dyn Error>> {
+    let _lock = test_lock()?;
     let pipe = pipe_cloexec()?;
     let (reader, writer) = pipe.into_parts();
     let inherited = writer.as_raw_fd();
@@ -369,6 +390,7 @@ fn mapped_and_closed_descriptor_actions_cannot_conflict() -> Result<(), Box<dyn 
 
 #[test]
 fn numeric_identity_is_applied_from_precomputed_values() -> Result<(), Box<dyn Error>> {
+    let _lock = test_lock()?;
     // SAFETY: getuid and getgid have no failure mode or pointer arguments.
     let credentials = unsafe {
         ProcessCredentials::new(
@@ -404,6 +426,7 @@ fn numeric_identity_is_applied_from_precomputed_values() -> Result<(), Box<dyn E
 
 #[test]
 fn default_child_signal_state_clears_mask_and_ignored_disposition() -> Result<(), Box<dyn Error>> {
+    let _lock = test_lock()?;
     let _guard = ignore_and_block(libc::SIGUSR1)?;
     let mut command = PreparedCommand::new("/bin/sh")?;
     command.arg("-c")?.arg("kill -USR1 $$; exit 99")?;

@@ -277,6 +277,7 @@ mod group_guard;
 mod identity;
 mod raw;
 mod signal;
+mod subreaper;
 mod wait;
 
 pub use child_signal::ChildSignalState;
@@ -296,6 +297,7 @@ pub use identity::{
     current_process_id, join_process_group, process_group,
 };
 pub use signal::{InvalidSignal, Signal, signal_process, signal_process_group};
+pub use subreaper::{acquire_subreaper, is_subreaper, release_subreaper};
 pub use wait::{ChildEvent, wait_any_event, wait_any_event_nohang, wait_event, wait_event_nohang};
 
 // Re-export libc status inspection macros for convenience

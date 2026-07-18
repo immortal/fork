@@ -30,7 +30,7 @@ Add `fork` to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-fork = "0.9.1"
+fork = "0.10.0"
 ```
 
 Or use cargo-add:
@@ -145,6 +145,29 @@ The group helpers are explicit:
   exposing the raw negative-PID `kill(2)` convention.
 - `wait_event*` and `wait_any_event*` report typed exit, signal, stop, and
   continue events and retry `waitpid(2)` after `EINTR`.
+
+### Adopt orphaned descendants
+
+On Linux and FreeBSD, a supervisor that is not PID 1 can opt into the OS
+subreaper role before starting its workload:
+
+```rust,no_run
+use fork::{acquire_subreaper, wait_any_event};
+
+acquire_subreaper()?;
+
+// Start the supervised workload. If an intermediate parent exits, its
+// orphaned descendants are adopted here and become visible to wait_any_*.
+let event = wait_any_event()?;
+println!("observed child event: {event:?}");
+# Ok::<(), std::io::Error>(())
+```
+
+Acquisition is process-wide, is not inherited across `fork`, and is preserved
+across `exec`. Adopted processes may have PIDs the supervisor did not spawn
+directly, so unknown PIDs from `wait_any_*` are expected. Subreaping does not
+enumerate live descendants or signal processes that escape an owned process
+group. The API returns `ErrorKind::Unsupported` outside Linux and FreeBSD.
 
 ### Fail-closed Process Groups
 
