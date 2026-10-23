@@ -115,7 +115,7 @@ impl Actions {
                 mappings,
                 closed: self.closed.into_iter().collect(),
                 allowed,
-                close_limit: descriptor_close_limit()?,
+                close_plan: descriptor_close_plan()?,
             },
             status_writer,
         ))
@@ -133,7 +133,7 @@ pub(crate) struct Prepared {
     mappings: Vec<PreparedMapping>,
     closed: Vec<RawFd>,
     allowed: Vec<RawFd>,
-    close_limit: RawFd,
+    close_plan: ClosePlan,
 }
 
 impl Prepared {
@@ -148,8 +148,7 @@ impl Prepared {
         for mapping in &self.mappings {
             close_raw(mapping.source.as_raw_fd());
         }
-        close_unintended(&self.allowed, self.close_limit);
-        Ok(())
+        close_unintended(&self.allowed, self.close_plan)
     }
 
     /// Apply the plan in a pre-thread daemon child that will return to Rust.
@@ -164,28 +163,27 @@ impl Prepared {
             close_raw(*descriptor);
         }
         self.mappings.clear();
-        close_unintended(&self.allowed, self.close_limit);
-        Ok(())
+        close_unintended(&self.allowed, self.close_plan)
     }
 }
 
 #[derive(Debug)]
 pub(crate) struct GuardPrepared {
     allowed: RawFd,
-    close_limit: RawFd,
+    close_plan: ClosePlan,
 }
 
 impl GuardPrepared {
     pub(crate) fn new(allowed: &OwnedFd) -> io::Result<Self> {
         Ok(Self {
             allowed: allowed.as_raw_fd(),
-            close_limit: descriptor_close_limit()?,
+            close_plan: descriptor_close_plan()?,
         })
     }
 
     /// Close every descriptor except the guard's owner-lifetime reader.
-    pub(crate) fn apply_in_child(&self) {
-        close_unintended_from(&[self.allowed], 0, self.close_limit);
+    pub(crate) fn apply_in_child(&self) -> Result<(), libc::c_int> {
+        close_unintended_from(&[self.allowed], 0, self.close_plan)
     }
 }
 
@@ -204,7 +202,15 @@ fn duplicate_cloexec(source: &OwnedFd, minimum: RawFd) -> io::Result<OwnedFd> {
     }
 }
 
-fn descriptor_close_limit() -> io::Result<RawFd> {
+/// A scan bound comes from a pre-fork inventory or descriptor-free hard-limit
+/// probe. A successful no-op probe selects Ranges, not a scan fallback.
+#[derive(Clone, Copy, Debug)]
+enum ClosePlan {
+    Ranges,
+    Scan(RawFd),
+}
+
+fn descriptor_close_plan() -> io::Result<ClosePlan> {
     let mut limit = libc::rlimit {
         rlim_cur: 0,
         rlim_max: 0,
@@ -213,7 +219,128 @@ fn descriptor_close_limit() -> io::Result<RawFd> {
     if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &raw mut limit) } == -1 {
         return Err(io::Error::last_os_error());
     }
-    bounded_descriptor_limit(limit.rlim_cur)
+    let soft_limit = bounded_descriptor_limit(limit.rlim_cur)?;
+    if range_closing_available() {
+        return Ok(ClosePlan::Ranges);
+    }
+    // FreeBSD's /dev/fd may list only 0..2 without fdescfs. Elsewhere the
+    // inventory is the fast path and includes fds above even a lowered hard
+    // limit. Neither an open nor an iteration failure makes it authoritative.
+    if !cfg!(target_os = "freebsd") {
+        let inventory = std::fs::read_dir("/dev/fd").and_then(|entries| {
+            inventory_limit(
+                soft_limit,
+                entries.map(|entry| entry.map(|entry| entry.file_name())),
+            )
+        });
+        if let Ok(bound) = inventory {
+            return Ok(ClosePlan::Scan(bound));
+        }
+    }
+    // No descriptor is opened by this fallback, so EMFILE and denied directory
+    // access still permit safe preparation. All probing remains before fork.
+    Ok(ClosePlan::Scan(probe_limit(
+        soft_limit,
+        finite_hard_limit(limit.rlim_max)?,
+    )))
+}
+
+/// Establish a finite ceiling without opening anything. On Linux a finite
+/// hard NOFILE cannot exceed `nr_open`; on macOS the kernel ceiling also bounds
+/// an unlimited hard NOFILE. Descriptors opened before lowering the *hard*
+/// limit can exceed this ceiling: without inventory/ranges that is unknowable.
+fn finite_hard_limit(hard: libc::rlim_t) -> io::Result<RawFd> {
+    #[cfg(target_os = "macos")]
+    let hard = {
+        let mut maximum: libc::c_int = 0;
+        let mut length = size_of::<libc::c_int>();
+        // SAFETY: NUL-terminated name and correctly sized writable output;
+        // sysctlbyname queries the kernel without opening a descriptor.
+        if unsafe {
+            libc::sysctlbyname(
+                c"kern.maxfilesperproc".as_ptr(),
+                (&raw mut maximum).cast(),
+                &raw mut length,
+                std::ptr::null_mut(),
+                0,
+            )
+        } != 0
+        {
+            // A finite hard limit is still a complete ceiling if the optional
+            // kernel cap cannot be queried. Only infinity needs that cap.
+            if hard != libc::RLIM_INFINITY {
+                return bounded_descriptor_limit(hard);
+            }
+            return Err(io::Error::last_os_error());
+        }
+        if length != size_of::<libc::c_int>() || maximum <= 0 {
+            return Err(io::Error::other("invalid kern.maxfilesperproc"));
+        }
+        let maximum = libc::rlim_t::try_from(maximum).map_err(io::Error::other)?;
+        if hard == libc::RLIM_INFINITY {
+            maximum
+        } else {
+            hard.min(maximum)
+        }
+    };
+    if hard == libc::RLIM_INFINITY {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "descriptor inventory unavailable and no finite hard descriptor limit",
+        ));
+    }
+    bounded_descriptor_limit(hard)
+}
+
+/// Include live descriptors above the soft limit without allocating or opening.
+fn probe_limit(soft: RawFd, hard: RawFd) -> RawFd {
+    let mut bound = soft;
+    for descriptor in soft..hard {
+        loop {
+            // SAFETY: F_GETFD observes an integer descriptor, changing nothing.
+            if unsafe { libc::fcntl(descriptor, libc::F_GETFD) } >= 0 {
+                bound = descriptor + 1;
+                break;
+            }
+            let error = io::Error::last_os_error();
+            match error.raw_os_error() {
+                Some(libc::EINTR) => {}
+                Some(libc::EBADF) => break,
+                // An unavailable observation cannot shrink the known ceiling.
+                // Close through that whole finite range instead of rejecting a
+                // previously successful preparation or assuming the fd absent.
+                _ => return soft.max(hard),
+            }
+        }
+    }
+    bound
+}
+
+/// Include every listed numeric descriptor, propagating incomplete iteration.
+fn inventory_limit(
+    soft_limit: RawFd,
+    entries: impl Iterator<Item = io::Result<std::ffi::OsString>>,
+) -> io::Result<RawFd> {
+    let mut bound = soft_limit;
+    for entry in entries {
+        let name = entry?;
+        if let Some(descriptor) = name.to_str().and_then(|name| name.parse::<RawFd>().ok()) {
+            bound = bound.max(descriptor.saturating_add(1));
+        }
+    }
+    Ok(bound)
+}
+
+/// Probe on every preparation, so a subsequently installed seccomp filter is
+/// honored. No valid descriptor can occupy this harmless unsigned-max range.
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+fn range_closing_available() -> bool {
+    close_range(libc::c_uint::MAX, libc::c_uint::MAX) == 0
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+const fn range_closing_available() -> bool {
+    false
 }
 
 fn bounded_descriptor_limit(limit: libc::rlim_t) -> io::Result<RawFd> {
@@ -239,37 +366,48 @@ fn duplicate_to(source: RawFd, target: RawFd) -> Result<(), libc::c_int> {
     }
 }
 
-fn close_unintended(allowed: &[RawFd], close_limit: RawFd) {
-    close_unintended_from(allowed, FIRST_NON_STDIO_FD, close_limit);
+fn close_unintended(allowed: &[RawFd], plan: ClosePlan) -> Result<(), libc::c_int> {
+    close_unintended_from(allowed, FIRST_NON_STDIO_FD, plan)
 }
 
-fn close_unintended_from(allowed: &[RawFd], first: RawFd, close_limit: RawFd) {
-    if close_with_ranges(allowed, first) {
-        return;
-    }
-    for descriptor in first..close_limit {
-        if allowed.binary_search(&descriptor).is_err() {
-            close_raw(descriptor);
+fn close_unintended_from(
+    allowed: &[RawFd],
+    first: RawFd,
+    plan: ClosePlan,
+) -> Result<(), libc::c_int> {
+    match plan {
+        // A real range failure is fatal: the probe did not inventory high fds.
+        ClosePlan::Ranges => close_with_ranges(allowed, first),
+        ClosePlan::Scan(limit) => {
+            for descriptor in first..limit {
+                if allowed.binary_search(&descriptor).is_err() {
+                    close_raw(descriptor);
+                }
+            }
+            Ok(())
         }
     }
 }
 
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-fn close_with_ranges(allowed: &[RawFd], first: RawFd) -> bool {
+fn close_with_ranges(allowed: &[RawFd], first: RawFd) -> Result<(), libc::c_int> {
     let mut range_start = first.cast_unsigned();
     for descriptor in allowed.iter().copied().filter(|fd| *fd >= first) {
         let descriptor = descriptor.cast_unsigned();
         if range_start < descriptor && close_range(range_start, descriptor - 1) == -1 {
-            return false;
+            return Err(crate::raw::last_errno());
         }
         range_start = descriptor.saturating_add(1);
     }
-    range_start > libc::c_uint::MAX - 1 || close_range(range_start, libc::c_uint::MAX) == 0
+    if range_start < libc::c_uint::MAX && close_range(range_start, libc::c_uint::MAX) == -1 {
+        return Err(crate::raw::last_errno());
+    }
+    Ok(())
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
-const fn close_with_ranges(_allowed: &[RawFd], _first: RawFd) -> bool {
-    false
+const fn close_with_ranges(_allowed: &[RawFd], _first: RawFd) -> Result<(), libc::c_int> {
+    Err(libc::ENOSYS)
 }
 
 #[cfg(target_os = "linux")]
@@ -298,7 +436,26 @@ pub(crate) fn close_raw(descriptor: RawFd) {
 
 #[cfg(test)]
 mod tests {
-    use super::bounded_descriptor_limit;
+    use super::{bounded_descriptor_limit, inventory_limit};
+
+    #[test]
+    fn inventory_limit_propagates_iteration_failure() {
+        let entries = [
+            Ok("128".into()),
+            Err(std::io::Error::from_raw_os_error(libc::EIO)),
+        ];
+        assert!(
+            matches!(inventory_limit(64, entries.into_iter()), Err(error) if error.raw_os_error() == Some(libc::EIO))
+        );
+    }
+
+    #[test]
+    fn inventory_limit_includes_high_descriptors_and_preserves_soft_bound() -> std::io::Result<()> {
+        let entries = [".", "-1", "2", "128", "not-a-descriptor"].map(|name| Ok(name.into()));
+        assert_eq!(inventory_limit(64, entries.into_iter())?, 129);
+        assert_eq!(inventory_limit(64, std::iter::empty())?, 64);
+        Ok(())
+    }
 
     #[test]
     fn bounded_descriptor_limit_saturates_at_raw_fd_max() {

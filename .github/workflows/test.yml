@@ -63,8 +63,10 @@ jobs:
         with:
           tool: cargo-semver-checks
 
-      - name: Compare with published 0.9.0 API
-        run: cargo semver-checks --baseline-version 0.9.0
+      # A pre-1.0 minor version bump otherwise permits breaking changes and
+      # skips the compatibility checks. This release promises an additive API.
+      - name: Compare with published 0.10.0 API
+        run: cargo semver-checks --baseline-version 0.10.0 --release-type minor
 
   policy:
     name: Dependency policy

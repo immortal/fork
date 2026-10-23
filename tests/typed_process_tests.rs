@@ -4,6 +4,7 @@ use std::{
     collections::BTreeSet,
     error::Error,
     io,
+    mem::MaybeUninit,
     sync::{
         Mutex, MutexGuard,
         atomic::{AtomicBool, Ordering},
@@ -14,9 +15,10 @@ use std::{
 };
 
 use fork::{
-    ChildEvent, ProcessFork, ProcessId, Signal, create_current_process_group, create_process_group,
-    current_process_id, fork_process, join_process_group, process_group, signal_process,
-    signal_process_group, wait_any_event_nohang, wait_event, wait_event_nohang, waitpid,
+    ChildEvent, ProcessFork, ProcessGroupId, ProcessId, Signal, create_current_process_group,
+    create_process_group, current_process_id, fork_process, join_process_group, process_group,
+    process_group_exists, signal_process, signal_process_group, wait_any_event_nohang, wait_event,
+    wait_event_nohang, waitpid,
 };
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(3);
@@ -182,6 +184,61 @@ fn group_signal_reaches_every_owned_member() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
+fn process_group_exists_reports_live_members_until_reaped() -> Result<(), Box<dyn Error>> {
+    let _lock = test_lock()?;
+    let mut leader = spawn_paused()?;
+    let group = create_process_group(leader.process())?;
+    assert!(process_group_exists(group)?);
+
+    signal_process_group(group, Signal::KILL)?;
+    assert_eq!(
+        wait_for_process_event(leader.process())?,
+        ChildEvent::Signalled {
+            pid: leader.process(),
+            signal: Signal::KILL
+        }
+    );
+    leader.mark_reaped();
+    assert!(!process_group_exists(group)?);
+    Ok(())
+}
+
+#[test]
+fn process_group_exists_counts_an_unreaped_member() -> Result<(), Box<dyn Error>> {
+    let _lock = test_lock()?;
+    let mut leader = spawn_paused()?;
+    let group = create_process_group(leader.process())?;
+
+    signal_process(leader.process(), Signal::KILL)?;
+    wait_for_exit_without_reaping(leader.process())?;
+    assert!(
+        process_group_exists(group)?,
+        "a group holding only an unreaped member must still be reported present"
+    );
+
+    assert_eq!(
+        wait_for_process_event(leader.process())?,
+        ChildEvent::Signalled {
+            pid: leader.process(),
+            signal: Signal::KILL
+        }
+    );
+    leader.mark_reaped();
+    assert!(!process_group_exists(group)?);
+    Ok(())
+}
+
+#[test]
+fn process_group_exists_rejects_the_broadcast_group() -> Result<(), Box<dyn Error>> {
+    let broadcast = ProcessGroupId::new(1).ok_or("group 1 must be representable")?;
+    let refused = process_group_exists(broadcast)
+        .err()
+        .ok_or("group 1 must be refused rather than probed as a broadcast")?;
+    assert_eq!(refused.kind(), io::ErrorKind::InvalidInput);
+    Ok(())
+}
+
+#[test]
 fn current_process_can_create_its_group_after_fork() -> Result<(), Box<dyn Error>> {
     let _lock = test_lock()?;
     match fork_process()? {
@@ -325,6 +382,56 @@ fn wait_for_process_event(process: ProcessId) -> io::Result<ChildEvent> {
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
                 format!("timed out waiting for child {process}"),
+            ));
+        }
+        thread::sleep(POLL_INTERVAL);
+    }
+}
+
+/// Wait until `process` has exited, leaving it unreaped as a zombie.
+fn wait_for_exit_without_reaping(process: ProcessId) -> io::Result<()> {
+    let process_id = libc::id_t::try_from(i128::from(process.get())).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "child process ID is outside the waitid range",
+        )
+    })?;
+    let deadline = Instant::now() + TEST_TIMEOUT;
+    loop {
+        let mut information = MaybeUninit::<libc::siginfo_t>::zeroed();
+        // SAFETY: information points to writable siginfo storage; P_PID and the
+        // checked positive process ID select the owned child, and WNOWAIT leaves
+        // it unreaped.
+        let result = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                process_id,
+                information.as_mut_ptr(),
+                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+            )
+        };
+        if result == 0 {
+            // SAFETY: successful waitid initializes siginfo; si_pid is zero when
+            // WNOHANG found no matching state transition.
+            let observed = unsafe { information.assume_init().si_pid() };
+            if observed == process.get() {
+                return Ok(());
+            }
+            if observed != 0 {
+                return Err(io::Error::other(format!(
+                    "waitid observed unexpected child {observed}"
+                )));
+            }
+        } else {
+            let error = io::Error::last_os_error();
+            if error.kind() != io::ErrorKind::Interrupted {
+                return Err(error);
+            }
+        }
+        if Instant::now() >= deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!("timed out observing exited child {process} without reaping it"),
             ));
         }
         thread::sleep(POLL_INTERVAL);

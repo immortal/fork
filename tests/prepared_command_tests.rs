@@ -163,7 +163,7 @@ fn environment_directory_and_stdout_mapping_are_materialized() -> Result<(), Box
     // Resolve symlinks so the expected value matches the shell's `$PWD`, which
     // is derived from `getcwd(3)` and is therefore canonical. On macOS `/tmp`
     // is a symlink to `/private/tmp`, so a literal comparison would fail there.
-    let working_directory = std::fs::canonicalize("/tmp")?;
+    let working_directory = std::fs::canonicalize(std::env::temp_dir())?;
     let working_directory = working_directory.to_str().ok_or_else(|| {
         io::Error::new(io::ErrorKind::InvalidData, "temp path is not valid UTF-8")
     })?;

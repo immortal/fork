@@ -17,9 +17,9 @@ use crate::{
     ChildEvent, ChildSignalState, ProcessGroupId, ProcessId, Signal,
     child_signal::Prepared as PreparedSignalState,
     descriptor::{Actions as DescriptorActions, Prepared as PreparedDescriptors},
-    pipe_cloexec,
+    pipe_cloexec, process_group_exists,
     raw::{last_errno, write_all},
-    signal_process, signal_process_group, wait_event_nohang,
+    signal_process_group, wait_event_nohang,
 };
 
 const DAEMON_MAGIC: u32 = 0x4441_454d;
@@ -75,7 +75,11 @@ impl DaemonCleanup {
         self.intermediate
     }
 
-    /// Return the owned daemon process group if it may still contain members.
+    /// Return the daemon group if it may still contain members.
+    ///
+    /// This is an observation/awaiting obligation, not signal authority. Cleanup
+    /// may already have reaped the intermediate which reserved the ID; never
+    /// signal this numeric group without a separate persistent pin.
     #[must_use]
     pub const fn process_group(&self) -> Option<ProcessGroupId> {
         self.process_group
@@ -191,6 +195,9 @@ impl Error for DaemonError {
 }
 
 /// The detached daemon observed by the original invoking process.
+///
+/// These reported IDs are observations, not persistent signal capabilities:
+/// successful startup reaps the intermediate that reserved the group ID.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub struct DaemonProcess {
     process: ProcessId,
@@ -198,13 +205,14 @@ pub struct DaemonProcess {
 }
 
 impl DaemonProcess {
-    /// Return the live detached daemon PID reported by the grandchild.
+    /// Return the detached daemon PID reported by the grandchild.
     #[must_use]
     pub const fn process(&self) -> ProcessId {
         self.process
     }
 
-    /// Return the owned process group created by the session leader.
+    /// Return the process-group ID created by the session leader.
+    /// The intermediate has been reaped; this identifier does not itself pin it.
     #[must_use]
     pub const fn process_group(&self) -> ProcessGroupId {
         self.process_group
@@ -360,13 +368,19 @@ struct DaemonPreparation {
 /// returns only after [`DaemonNotifier::notify_ready`] succeeds. The detached
 /// grandchild receives the notifier and may initialize ordinary Rust state
 /// because the fork occurred while the process was still single-threaded.
+/// The owner must keep `SIGCHLD` non-ignored and `SA_NOCLDWAIT` unset, and exclusively
+/// serialize child collection and signal-policy changes for this call. Prefer
+/// retaining a failed intermediate through cleanup signals with `waitid`. If
+/// unavailable (`ENOSYS`/`EPERM`), consuming exact-child waits preserve success;
+/// consuming an unexpected exit forbids further PID/group cleanup delivery.
 ///
 /// # Errors
 ///
 /// Returns exact fork/session/directory/descriptor/initialization errors,
 /// timeout, channel abandonment, or malformed handshake data. Failure paths
 /// kill and reap within a bounded cleanup window and return any residual
-/// ownership through [`DaemonError::cleanup_pending`].
+/// ownership through [`DaemonError::cleanup_pending`]. Auto-reaping owner policy
+/// is rejected before fork at `DaemonStage::SignalState` with `InvalidInput`.
 pub fn checked_daemon(
     options: DaemonOptions,
     startup_timeout: Duration,
@@ -376,6 +390,8 @@ pub fn checked_daemon(
 
 impl DaemonPreparation {
     fn new(options: DaemonOptions) -> Result<Self, DaemonError> {
+        crate::child_signal::require_waitable_children()
+            .map_err(|error| DaemonError::operating_system(DaemonStage::SignalState, error))?;
         let pipe = pipe_cloexec()
             .map_err(|error| DaemonError::operating_system(DaemonStage::Handshake, error))?;
         let (status_reader, initial_status_writer) = pipe.into_parts();
@@ -606,14 +622,16 @@ fn parent_wait_ready(
                     && record.stage == DaemonStage::Initialization as u8
                     && record.value == 0 =>
             {
-                if let Err(error) = wait_for_intermediate(intermediate, started, timeout) {
-                    return Err((error, group));
-                }
-                return Ok(DaemonProcess {
+                // Finish all fallible record validation before reaping the pin.
+                let process = DaemonProcess {
                     process: daemon.ok_or_else(|| (DaemonError::invalid_handshake(), group))?,
                     process_group: group
                         .ok_or_else(|| (DaemonError::invalid_handshake(), group))?,
-                });
+                };
+                if let Err(error) = wait_for_intermediate(intermediate, started, timeout) {
+                    return Err((error, group));
+                }
+                return Ok(process);
             }
             RECORD_FAILURE if record.value > 0 => {
                 let Some(stage) = daemon_stage_from_wire(record.stage) else {
@@ -715,9 +733,26 @@ fn wait_for_intermediate(
     timeout: Duration,
 ) -> Result<(), DaemonError> {
     loop {
-        match wait_event_nohang(intermediate) {
-            Ok(Some(ChildEvent::Exited { code: 0, .. })) => return Ok(()),
-            Ok(Some(event)) if event.is_terminal() => {
+        // Prefer retaining failed exits: this PID reserves the group/session.
+        // Consumed fallback outcomes must never authorize later signals.
+        match crate::wait::observe_exit_nohang(intermediate) {
+            Ok(crate::wait::ExitObservation::Reaped(ChildEvent::Exited { code: 0, .. })) => {
+                return Ok(());
+            }
+            Ok(crate::wait::ExitObservation::Pinned(Some(ChildEvent::Exited {
+                code: 0, ..
+            }))) => {
+                return match wait_event_nohang(intermediate) {
+                    Ok(Some(ChildEvent::Exited { code: 0, .. })) => Ok(()),
+                    _ => Err(DaemonError::invalid_handshake()),
+                };
+            }
+            Ok(
+                crate::wait::ExitObservation::Reaped(_)
+                | crate::wait::ExitObservation::Pinned(Some(_)),
+            ) => {
+                // If fallback consumed an unexpected exit, cleanup's next
+                // exact-child observation is ECHILD and forbids all delivery.
                 return Err(DaemonError::invalid_handshake());
             }
             Err(error) if error.raw_os_error() == Some(libc::ECHILD) => {
@@ -726,7 +761,7 @@ fn wait_for_intermediate(
             Err(error) => {
                 return Err(DaemonError::operating_system(DaemonStage::Handshake, error));
             }
-            Ok(Some(_) | None) => {}
+            Ok(crate::wait::ExitObservation::Pinned(None)) => {}
         }
         if started.elapsed() >= timeout {
             return Err(DaemonError::timed_out(timeout));
@@ -736,13 +771,31 @@ fn wait_for_intermediate(
 }
 
 fn cleanup_daemon(intermediate: ProcessId, group: Option<ProcessGroupId>) -> DaemonCleanup {
-    if let Some(group) = group {
-        let _ = signal_process_group(group, Signal::KILL);
+    // Prefer retaining the pin through all signals. A consumed fallback exit,
+    // ECHILD, uncertain ownership, or invalid policy forbids both group and PID
+    // delivery. The group remains an observation-only cleanup obligation.
+    let mut reaped = false;
+    if crate::child_signal::require_waitable_children().is_ok() {
+        match crate::wait::observe_exit_nohang(intermediate) {
+            Ok(crate::wait::ExitObservation::Pinned(_)) => {
+                if let Some(group) = group {
+                    let _ = signal_process_group(group, Signal::KILL);
+                }
+                reaped = matches!(
+                    crate::child_signal::signal_owned_child(intermediate, Signal::KILL),
+                    Ok(Some(_))
+                );
+            }
+            Ok(crate::wait::ExitObservation::Reaped(_)) => reaped = true,
+            Err(_) => {}
+        }
     }
-    let _ = signal_process(intermediate, Signal::KILL);
 
     let started = Instant::now();
     let intermediate_pending = loop {
+        if reaped {
+            break None;
+        }
         match wait_event_nohang(intermediate) {
             Ok(Some(event)) if event.is_terminal() => break None,
             Err(error) if error.raw_os_error() == Some(libc::ECHILD) => break None,
@@ -774,20 +827,12 @@ fn cleanup_daemon(intermediate: ProcessId, group: Option<ProcessGroupId>) -> Dae
     }
 }
 
+/// Whether bounded cleanup must keep waiting for `group`.
+///
+/// Any probe error keeps the group pending, so cleanup fails closed exactly as
+/// the former private probe did for every errno other than `ESRCH`.
 fn group_exists(group: ProcessGroupId) -> bool {
-    loop {
-        // SAFETY: signal zero is used internally only to verify bounded cleanup
-        // of a process group whose creation was confirmed by the handshake.
-        let result = unsafe { libc::kill(-group.get(), 0) };
-        if result == 0 {
-            return true;
-        }
-        let errno = last_errno();
-        if errno == libc::EINTR {
-            continue;
-        }
-        return errno != libc::ESRCH;
-    }
+    process_group_exists(group).unwrap_or(true)
 }
 
 fn retry_setsid() -> Result<libc::pid_t, libc::c_int> {
@@ -854,5 +899,42 @@ mod tests {
         assert_eq!(daemon_stage_from_wire(6), Some(DaemonStage::Initialization));
         assert_eq!(daemon_stage_from_wire(8), Some(DaemonStage::SignalState));
         assert_eq!(daemon_stage_from_wire(1), None);
+    }
+
+    /// Error cleanup must retain the intermediate's PID/group reservation.
+    #[test]
+    fn failed_intermediate_remains_unreaped_until_cleanup() -> std::io::Result<()> {
+        use std::time::{Duration, Instant};
+        let process = match crate::fork_process()? {
+            crate::ProcessFork::Parent(process) => process,
+            crate::ProcessFork::Child => {
+                // SAFETY: only async-signal-safe calls in this test child.
+                unsafe {
+                    libc::setpgid(0, 0);
+                    libc::_exit(70);
+                }
+            }
+        };
+        let result = super::wait_for_intermediate(process, Instant::now(), Duration::from_secs(2));
+        let observed = crate::wait_event_nohang(process);
+        // Always clean before asserting, without signalling a reaped PID.
+        if matches!(&observed, Ok(None))
+            || matches!(&observed, Ok(Some(event)) if !event.is_terminal())
+        {
+            crate::signal_process(process, crate::Signal::KILL)?;
+            crate::wait_event(process)?;
+        }
+        assert!(matches!(
+            result,
+            Err(super::DaemonError::InvalidHandshake { .. })
+        ));
+        assert!(
+            matches!(
+                observed,
+                Ok(Some(crate::ChildEvent::Exited { code: 70, .. }))
+            ),
+            "the failed intermediate's reservation was released before cleanup: {observed:?}"
+        );
+        Ok(())
     }
 }

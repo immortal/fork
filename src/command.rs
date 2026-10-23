@@ -19,7 +19,7 @@ use crate::{
     descriptor::{Actions as DescriptorActions, Prepared as PreparedDescriptors, close_raw},
     pipe_cloexec,
     raw::{last_errno, write_all},
-    signal_process, wait_event_nohang,
+    wait_event_nohang,
 };
 
 const FAILURE_MAGIC: u32 = 0x494d_4d4f;
@@ -168,12 +168,13 @@ impl SpawnError {
         }
     }
 
-    /// Return a killed but not yet reaped child that the broker must retain.
+    /// Return a child whose cleanup could not be confirmed within the bound.
     ///
-    /// This is normally `None`. A value is returned only when bounded cleanup
-    /// could not observe termination, for example while the child is stuck in
-    /// uninterruptible kernel I/O. The PID remains a live ownership obligation
-    /// and must be reaped through the normal child-event loop.
+    /// This is normally `None`. Auto-reaping policy or uncertain ownership
+    /// prevents a cleanup signal; a stopped or otherwise unfinished child may
+    /// therefore be reported without being killed. This ID is an observation /
+    /// collection obligation, never signal authority: re-establish a persistent
+    /// child pin before any later delivery, and serialize policy and collection.
     #[must_use]
     pub const fn cleanup_pending(&self) -> Option<ProcessId> {
         match self {
@@ -221,7 +222,8 @@ pub struct SpawnedChild {
 }
 
 impl SpawnedChild {
-    /// Return the live child process handle.
+    /// Return the PID observed at fork, not a persistent signal capability.
+    /// The program may already have exited, especially under auto-reaping.
     #[must_use]
     pub const fn process(&self) -> ProcessId {
         self.process
@@ -395,13 +397,19 @@ impl PreparedCommand {
     /// Fork and execute the command with a bounded startup handshake.
     ///
     /// Success means `execve` completed and closed the handshake descriptor,
-    /// not that the program remains running. Every failure path terminates and
-    /// reaps the pre-exec child before returning.
+    /// not that the program remains running. The pipe handshake works even if
+    /// the owner ignores `SIGCHLD` or sets `SA_NOCLDWAIT`; creation does not reject
+    /// or change that policy. Numeric-PID failure cleanup, however, requires a
+    /// waitable child pin. Otherwise it skips delivery and reports any unfinished
+    /// child through `cleanup_pending`. Serialize policy changes and child
+    /// collection with this single-threaded operation.
     ///
     /// # Errors
     ///
     /// Returns a typed startup stage and OS error, a timeout, or a malformed
-    /// handshake error.
+    /// handshake error. Child-side range-close failures report
+    /// `SpawnStage::DescriptorDuplication`, never successful exec. Failure cleanup
+    /// may report a child it could not safely signal, rather than kill an unpinned PID.
     pub fn spawn(self, startup_timeout: Duration) -> Result<SpawnedChild, SpawnError> {
         SpawnPreparation::new(self)?.spawn(startup_timeout)
     }
@@ -750,7 +758,13 @@ fn validate_credentials(credentials: Option<&ProcessCredentials>) -> io::Result<
 }
 
 fn terminate_and_reap_bounded(process: ProcessId) -> Option<ProcessId> {
-    let _ = signal_process(process, Signal::KILL);
+    // A signal-handler policy change must not turn cleanup into a stale-PID kill.
+    if matches!(
+        crate::child_signal::signal_owned_child(process, Signal::KILL),
+        Ok(Some(_))
+    ) {
+        return None;
+    }
     let deadline = Instant::now() + CLEANUP_TIMEOUT;
     loop {
         match wait_event_nohang(process) {

@@ -12,8 +12,8 @@ use std::{
 };
 
 use fork::{
-    CheckedDaemon, DaemonCleanup, DaemonError, DaemonOptions, DaemonProcess, DaemonStage, Signal,
-    checked_daemon, pipe_cloexec, signal_process_group,
+    CheckedDaemon, DaemonCleanup, DaemonError, DaemonOptions, DaemonProcess, DaemonStage,
+    checked_daemon, pipe_cloexec,
 };
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(3);
@@ -169,18 +169,46 @@ fn dropped_notifier_is_reported_as_abandoned_startup() -> Result<(), Box<dyn Err
 #[test]
 fn startup_timeout_kills_the_owned_daemon_group() -> Result<(), Box<dyn Error>> {
     let timeout = Duration::from_millis(25);
-    match checked_daemon(DaemonOptions::new(), timeout) {
-        Ok(CheckedDaemon::Daemon(_notifier)) => loop {
-            // SAFETY: pause is used only in the detached test daemon, which the
-            // original parent kills when the startup deadline expires.
-            unsafe {
-                libc::pause();
+    let (reader, release) = pipe_cloexec()?.into_parts();
+    let descriptor = reader.as_raw_fd();
+    let mut options = DaemonOptions::new();
+    options.preserve_descriptor(reader)?;
+    match checked_daemon(options, timeout) {
+        Ok(CheckedDaemon::Daemon(_notifier)) => {
+            // Do not report ready. The parent holds `release` until it has
+            // checked the timeout's kill, then EOF cleans even a broken kill
+            // implementation without ever signalling an unpinned group ID.
+            let deadline = Instant::now() + STARTUP_TIMEOUT * 5;
+            loop {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    daemon_exit(6);
+                }
+                let mut event = libc::pollfd {
+                    fd: descriptor,
+                    events: libc::POLLIN,
+                    revents: 0,
+                };
+                let milliseconds =
+                    libc::c_int::try_from(remaining.as_millis().max(1)).unwrap_or(libc::c_int::MAX);
+                // SAFETY: the descriptor is explicitly preserved; event is live storage.
+                let ready = unsafe { libc::poll(&raw mut event, 1, milliseconds) };
+                if ready >= 0 {
+                    daemon_exit(6);
+                }
+                if io::Error::last_os_error().kind() != io::ErrorKind::Interrupted {
+                    daemon_exit(7);
+                }
             }
-        },
+        }
         Err(DaemonError::TimedOut {
             cleanup_pending, ..
         }) => {
+            let killed = finish_pending_cleanup(cleanup_pending);
+            drop(release);
+            // Cleanup precedes the assertion even if the tested group kill was omitted.
             finish_pending_cleanup(cleanup_pending)?;
+            killed?;
         }
         other => return Err(io::Error::other(format!("unexpected result: {other:?}")).into()),
     }
@@ -248,7 +276,6 @@ fn finish_pending_cleanup(cleanup: DaemonCleanup) -> Result<(), Box<dyn Error>> 
         return Err(io::Error::other("intermediate child remained after timeout cleanup").into());
     }
     if let Some(group) = cleanup.process_group() {
-        let _ = signal_process_group(group, Signal::KILL);
         let deadline = Instant::now() + STARTUP_TIMEOUT;
         while group_exists(group.get()) {
             if Instant::now() >= deadline {
@@ -264,7 +291,6 @@ fn wait_for_group_exit(process: DaemonProcess) -> Result<(), Box<dyn Error>> {
     let deadline = Instant::now() + STARTUP_TIMEOUT;
     while group_exists(process.process_group().get()) {
         if Instant::now() >= deadline {
-            let _ = signal_process_group(process.process_group(), Signal::KILL);
             return Err(io::Error::other("ready daemon did not exit").into());
         }
         thread::sleep(POLL_INTERVAL);

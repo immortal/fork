@@ -31,7 +31,9 @@ Comprehensive coverage of process management, daemon creation, stdio safety, for
 Runs serially with bounded waits and cleanup guards. It covers checked fork
 results, exact exit events, stop/continue observation, single-process and group
 signal delivery, parent/child process-group setup, draining coalesced terminal
-events, and blocking wait retry after `EINTR`.
+events, blocking wait retry after `EINTR`, and the process-group existence
+probe: a live group, a group holding only an unreaped member, and refusal of
+the broadcast group.
 
 ### `fd_tests.rs` - Broker IPC Primitives
 
@@ -54,13 +56,130 @@ timeouts, bounded group cleanup, repeated `EINTR`, directory changes, explicit
 stdio redirection, and preserved descriptors. Every detached test process
 exits through `_exit` and the original test process verifies group cleanup.
 
+The private daemon regression `failed_intermediate_remains_unreaped_until_cleanup`
+requires a nonzero-exit intermediate to remain waitable after the readiness
+check fails, preserving its PID/group reservation until error cleanup signals.
+The startup-timeout fixture also has an owner-held release pipe, so a missing
+group kill still fails its assertion but fixture cleanup needs no stale-ID kill.
+
 ### `group_guard_tests.rs` - Fail-closed Process Groups
 
 Runs the guard lifecycle serially with deadlines and cleanup ownership. It
 covers running and stopped workloads, `TERM`/`STOP`/`CONT`/`KILL` isolation,
 clean disarm, invalid timeouts, repeated activation, failed exec, empty-group
 cleanup, unrelated and standard descriptor closure, dead and stopped helpers,
-and deliberate session escape.
+and deliberate session escape. It also proves that an armed guard keeps its
+emptied group reserved through an anchor that is not the owner's child, that
+disarm releases it, and that owner loss kills and then releases it. New signal
+cases prove live delivery, no direct signal after externally reaped helper
+loss, deadline expiry without delivery while the helper is stopped, skipping
+a late reply after resume, timeout validation, and anchor-only `Ok`/`EPERM`.
+Stopped-helper disarm resumes without touching the workload; stopped-helper
+armed Drop resumes and kills it. Both also run after `waitpid(WUNTRACED)` has
+consumed the stop event (not `WNOWAIT`), matching the broker's all-child drain.
+Unit tests additionally cover partial reply framing across a timeout, stale
+same-signal replies with older request IDs, request-ID exhaustion, EOF with a
+half-closed peer that has not hung up, mutex deadline expiry, preserved auto
+traits, a taken owner, and a full request socket that must not block disarm.
+
+### `stopped_anchor.rs` - Pre-exit Anchor Stop
+
+A GNU/Linux-only harness-free executable compiles its own temporary `LD_PRELOAD`
+shim to stop the real anchor immediately after `setpgid(0, 0)`. Disarm must kill
+and reap only that anchor. The test adopts and cleans any leaked stopped anchor
+on failure and removes its temporary source and shared library. Requires `cc`.
+Static targets (including default Linux/musl) cannot interpose `setpgid`, so this
+fixture is a gated no-op there; the GNU run covers the scheduling regression.
+
+### `descriptor_fallback.rs` - Lowered Descriptor Limits
+
+A serial harness-free executable opens a non-CLOEXEC writer above a subsequently
+lowered soft limit, then proves neither a guard helper nor a prepared exec child
+retains it. Limits are restored before return. Linux repeats with a process-local
+seccomp filter returning ENOSYS for `close_range`; macOS exercises the portable
+fallback natively. Descriptor exhaustion proves guard/prepared spawn still
+succeed without an inventory slot, using descriptor-free hard-limit probing.
+A separate Linux sandbox denies directory opens and limits descriptors to a
+finite hard ceiling; high descriptors above the soft limit must still close.
+A unit test injects an iteration error so an incomplete directory cannot be
+accepted as an inventory. A separate Linux child permits the no-op range probe but
+rejects actual ranges; guard creation, prepared spawn and checked daemonization
+must all fail closed.
+Children are killed/reaped before assertions, including when
+the regression fails.
+
+### `sigchld_ignored.rs` - Waitable Owner Policy
+
+A harness-free executable verifies that guard creation and prepared spawn
+succeed under `SIGCHLD=SIG_IGN` and `SA_NOCLDWAIT`, without changing owner policy.
+The helper's anchor stays pinned and `signal_group` actually ends a workload's
+lifetime. Checked daemonization alone rejects that owner before fork. Cleanup
+of a stopped helper refuses PID signals under auto-reaping. The fixture restores
+policy and resumes/reaps that helper before asserting. A separate valid owner
+handler would reap the helper's anchor if inherited there; the helper's reset
+must preserve the pin until disarm. Dispositions are always restored.
+
+### `waitable_children.rs` - Explicit Owner Policy Correction
+
+This harness-free test covers default, ignored, and `SA_NOCLDWAIT` dispositions
+(with default and custom handlers), plus a valid handler that must remain
+unchanged. It checks read-only observation, both correction return values,
+idempotence, handler masks/flags, daemon rejection before correction and successful
+guard, prepared-command, and checked-daemon lifecycles afterwards. A unit test
+covers the shared policy classifier independently of process-global state.
+
+### `atfork_anchor.rs` - Fork Callbacks Outside the Helper
+
+Runs without libtest, one fresh process per case, because `pthread_atfork`
+registrations are permanent. Callbacks act only outside the owner: one reaps
+the helper's children, the other restores SIGCHLD auto-reaping in the helper
+and delays the anchor so it exits after startup. Guard creation must succeed,
+the armed group must stay pinned past the delay, a helper-mediated `SIGKILL` or
+owner loss must kill a real workload, and the owner's policy must be unchanged.
+Each schedule ends once in disarm and once in owner loss. Creating the anchor
+with `fork(3)` fails these cases: creation fails, or the pin
+is released while the guard is armed. The cases use only portable APIs.
+
+### `anchor_clone_policy.rs` - Sandboxed Anchor Creation
+
+A Linux seccomp filter answers `EACCES` for every `clone` except the exact form
+the linked C library uses for `fork`: glibc's `CHILD_SETTID | CHILD_CLEARTID |
+SIGCHLD` with zero stack, parent-TID and TLS arguments (musl forks with
+`SYS_fork`, so the filter denies `clone` entirely on x86-64). The fixture proves
+that `fork` still works and deviating forms are refused, then requires guard
+creation, a pinned group and disarm to succeed. A bare `clone(SIGCHLD)` anchor,
+or one repeating the child TID pointer in the TLS slot, fails here with
+`EACCES`, which the helper reports.
+
+### `daemon_waitid_denied.rs` - Real Sandbox Denial
+
+A Linux seccomp filter answers `EACCES` for `waitid` only. Checked
+daemonization must still succeed through the exact-child `waitpid` fallback,
+collect the finite daemon's exit zero, and drain to ECHILD. It needs no
+dynamic interposition, so it also runs on musl.
+
+### `owner_cleanup.rs` - Cleanup Policy and Lost Ownership
+
+GNU/Linux-only preload schedules exercise stopped-helper cleanup under both
+auto-reaping policies, a stopped pre-exec child reported rather than killed,
+and a helper collected between the last idle wait and deadline delivery. The
+oracle suppresses and fails any stale CONT/KILL attempt. Another schedule delays
+a running helper's read while the owner has a SIGCONT callback: cleanup must not
+invoke that inherited callback. A denied resume also must not fail a running
+helper that finishes via its socket. These cases succeed on 0.10.0 and detect
+the intermediate 0.11.0 regression before the helper's SIGCONT reset.
+`inherited_reaper.rs` installs non-SIGCHLD callbacks (USR1 and URG) that collect
+children only in the helper: delivery, disarm and owner loss must never signal
+an unpinned ID, ignored USR2 stays ignored, and owner handlers remain unchanged.
+`waitid_fallback.rs` denies waitid, preserves successful daemonization, rejects
+an unexpectedly terminated intermediate without unsafe cleanup delivery, and
+forces a terminal helper event into the fallback observation before CONT. Disarm
+must receive the consumed exit rather than lose it and fail with ECHILD. Each
+waitid schedule runs once per denial errno (ENOSYS, EPERM, EACCES, EINVAL and
+EIO), because sandboxes and old kernels answer with different errnos;
+`FORK_ONLY_CASE` and a numeric `FORK_ONLY_ERRNO` select one schedule and denial
+for mutation verification. Commands, policy restoration, exact-child
+cleanup and orphan adoption are bounded.
 
 ### `broker_owner_loss.rs` - Forced Broker Death
 
@@ -267,7 +386,7 @@ Unlike unit tests in `src/lib.rs`, integration tests:
 
 1. **Run in separate processes** - Each test file is compiled as its own binary
 2. **Can call `daemon()`** - The parent process in tests doesn't terminate the test runner
-3. **Use file-based communication** - Temporary files in `/tmp` for parent-child verification
+3. **Use file-based communication** - Temporary files under the configured `TMPDIR` for parent-child verification
 4. **Have proper isolation** - Each test uses unique temporary directories to avoid conflicts
 5. **Clean up after themselves** - Temporary files are removed after test completion
 6. **Document expected behavior** - Each test has detailed comments explaining what happens

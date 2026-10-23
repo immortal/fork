@@ -30,7 +30,7 @@ Add `fork` to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-fork = "0.10.0"
+fork = "0.11.0"
 ```
 
 Or use cargo-add:
@@ -142,7 +142,12 @@ The group helpers are explicit:
 - `join_process_group(process, group)` joins another owned child.
 - `signal_process(process, signal)` targets exactly one PID.
 - `signal_process_group(group, signal)` targets every group member without
-  exposing the raw negative-PID `kill(2)` convention.
+  exposing the raw negative-PID `kill(2)` convention. Group 1 is refused,
+  because `kill(-1, ..)` is a broadcast rather than a group selector.
+- `process_group_exists(group)` reports whether any member, including an
+  unreaped zombie, remains, without delivering a signal. Use it with a
+  deadline to confirm that a killed group has drained; never signal a group
+  because it was reported present, since an emptied group's ID can be reused.
 - `wait_event*` and `wait_any_event*` report typed exit, signal, stop, and
   continue events and retry `waitpid(2)` after `EINTR`.
 
@@ -190,19 +195,26 @@ starts and keeps it beside—not inside—the workload group.
         │ broker IPC
         ▼
  single-threaded broker ─── owner socket ─── guard helper
-        │                                      │
-        │ spawns into reserved group           │ unexpected EOF
-        ▼                                      │ sends SIGKILL
- process group ◄───────────────────────────────┘
+        │                                      │ │
+        │ spawns into reserved group           │ │ unexpected EOF
+        ▼                                      │ │ sends SIGKILL
+ process group ◄───────────────────────────────┘ │
+   ├── anchor zombie (the helper's child) ◄──────┘ reaped on disarm
    └── workload process(es)
 ```
 
 The broker owns the socket endpoint and the `ProcessGroupGuard` value. The
 helper owns the other endpoint and deliberately remains outside the workload
-group. The kernel closes the broker endpoint even after `SIGKILL`; the helper
-observes EOF and kills the complete group. During a clean shutdown, `disarm`
-sends an explicit record instead, so the helper exits without signaling the
-workload.
+group. It also owns the group's anchor: a child which created the group and
+exited at once, and which the helper leaves unreaped while the guard is armed.
+That zombie keeps the group, and its numeric ID, reserved even after every
+workload member has exited or left, while the helper holds the anchor.
+Armed-group signals go through `guard.signal_group(signal, timeout)`: the helper
+performs the kill itself before releasing the anchor. If the helper dies
+unexpectedly, requests fail instead of reaching a potentially reused group ID. The kernel closes the broker endpoint even after `SIGKILL`; the
+helper observes EOF and kills the complete group, which the anchor still pins.
+During a clean shutdown, `disarm` sends an explicit record instead, so the
+helper reaps the anchor and exits without signaling the workload.
 
 #### Typical lifecycle
 
@@ -220,11 +232,12 @@ command
     .process_group(ProcessGroup::Join(guard.process_group()));
 let child = command.spawn(timeout)?;
 
-// The workload has joined, so the temporary group anchor can retire.
+// The workload has joined the group the guard reserved and pins.
 guard.activate(timeout)?;
 let event = wait_event(child.process())?;
 
-// Normal completion: reap the helper without signaling the now-empty group.
+// Normal completion: the helper reaps its anchor, releasing the pin, and
+// exits without signaling the group.
 guard.disarm(timeout)?;
 println!("workload finished: {event:?}");
 # Ok::<(), Box<dyn std::error::Error>>(())
@@ -233,38 +246,122 @@ println!("workload finished: {event:?}");
 The repository includes this lifecycle as the runnable
 `process_group_guard` example.
 
-Internally, `new` first creates a short-lived anchor which reserves a valid
-process-group ID, then creates the out-of-group guard. The caller starts the
-workload in that reserved group and calls `activate`, which retires and reaps
-the anchor. One guard helper and one close-on-exec socket remain for the active
-group. Dropping an armed guard is fail-closed: it closes the endpoint, lets the
-helper kill the group, and performs bounded helper cleanup.
+Internally, `new` starts the out-of-group helper, which creates the anchor
+without running fork callbacks, makes it the leader of a new group, and reports
+that group's ID once it exists. The
+caller starts the workload in that reserved group and calls `activate`, which
+records that the workload joined. One guard helper, its anchor zombie, and one
+close-on-exec socket remain for the active group. Dropping an armed guard is
+fail-closed: it closes the endpoint, lets the helper kill the group and reap
+the anchor, and waits for helper cleanup under the deadline described below.
 
 #### Ownership and limits
 
 - Use this API in a dedicated single-threaded process broker, before starting a
-  multithreaded runtime. It intentionally has no Tokio dependency, shared lock,
-  or `Arc`.
+  multithreaded runtime. It has no Tokio dependency or `Arc`; an owner-side
+  mutex serializes `&self` signal exchanges without changing the guard's auto
+  traits. Lock acquisition and socket I/O share the request's deadline.
 - The broker must exclusively own and serialize collection of its direct-child
   events. `guard_process` exists so an all-child wait loop can classify an
-  unexpected helper event; such an event means containment has failed and the
-  broker must kill the affected group.
-- Startup performs two helper forks. `activate` removes the anchor, leaving one
-  sleeping helper process and one socket endpoint per active group. The helper
-  blocks in `read` and consumes no scheduled CPU while healthy, but one process
-  per group is still a real capacity cost for high-cardinality supervisors.
+  unexpected helper event; such an event means containment has failed. Never
+  directly signal its numeric group unless an independently verified unreaped
+  zombie member or an owned unreaped child whose PID equals the PGID still
+  pins that ID. Neither a helper liveness check nor a live nonleader's
+  `getpgid` observation is a pin: that member can leave immediately afterwards.
+- `new` and `signal_group` work even when the owner ignores `SIGCHLD` or sets
+  `SA_NOCLDWAIT`: the helper establishes its own waitable anchor policy. For
+  owner-side cleanup to resume or kill a helper, keep SIGCHLD non-ignored and
+  SA_NOCLDWAIT unset and serialize policy changes and collection. Each cleanup
+  PID signal checks policy and an unreaped child pin first. Otherwise cleanup
+  closes the socket and reports an error, but cannot resume or kill a stopped
+  helper. A running helper can still act on disarm/EOF and release the anchor.
+  The library never silently changes the owner's process-global policy.
+- Startup creates two processes: the helper, with an ordinary `fork` that runs
+  registered `pthread_atfork` callbacks as any fork does, and its anchor, which
+  runs none (see below). Each active group then holds one sleeping helper
+  process, one anchor zombie, and one socket endpoint.
+  The helper blocks in `read` and consumes no scheduled CPU while healthy, and
+  a zombie holds only a process-table entry, but two entries per group are
+  still a real capacity cost for high-cardinality supervisors.
 - Helper children allocate no shared state and retain only their guard
   descriptor. Linux and FreeBSD close inherited descriptors with
-  `close_range`; the portable fallback scans up to the soft descriptor limit.
+  `close_range`, probed in the owner before every preparation without closing a
+  valid fd. A sandbox must answer that probe with an errno: a filter that kills
+  on `close_range` now terminates the owner, where 0.10.0 called it only in the
+  child and that child died instead. Both fail the operation.
+  When supported, no descriptor inventory is needed, but an actual range-close
+  failure then aborts the child operation: there is no incomplete soft-limit
+  fallback. Otherwise `/dev/fd` inventories the highest open fd before fork.
+  If opening or iterating that inventory fails, `fcntl(F_GETFD)` probes from
+  the soft limit through the finite hard `RLIMIT_NOFILE` ceiling, without opening
+  anything; macOS caps that ceiling with descriptor-free `kern.maxfilesperproc`.
+  Linux's hard limit cannot exceed `nr_open`. FreeBSD skips its potentially
+  incomplete `/dev/fd` inventory and uses this probe when ranges are unavailable.
+  If `F_GETFD` cannot classify a descriptor, closing uses the whole finite
+  ceiling instead. Preparation fails closed if no finite ceiling can be established. Residual limitation: a descriptor opened before the **hard** limit was
+  lowered can exceed that ceiling; retain inventory/range access in that case.
+  Concurrent descriptor creation/limit changes must be excluded during preparation.
   Parent cleanup briefly yields, then uses bounded exponential sleeps capped at
   five milliseconds rather than busy polling.
-- `activate` and `disarm` use caller-supplied nonzero cleanup deadlines. The
-  fail-closed `Drop` fallback can block for up to three seconds while reaping a
-  defective helper.
-- Disarm immediately after reaping the final owned group member. Portable Unix
-  exposes only a numeric ID for an empty process group; it provides no handle
-  which prevents that ID from later being reused. An armed guard must never be
-  retained as authority over an already-empty group.
+- `activate` is bookkeeping only; it validates its nonzero timeout for source
+  compatibility. `disarm` uses the supplied deadline; armed `Drop` uses three
+  seconds. Both verify child ownership and resume initially and on each stop,
+  even if a broker drain already consumed the helper's stop event, so it can
+  process disarm or owner EOF. Terminal reaps and ECHILD never authorize CONT.
+  After the deadline they kill the helper, then reap it: that final wait depends
+  on kernel progress and has no absolute bound. A helper unable to run cannot
+  guarantee workload cleanup. A full owner socket makes disarm return a write
+  error and close the owner, rather than block before resuming helper cleanup.
+- While armed, use `signal_group`, never `signal_process_group`. Helper loss
+  returns `BrokenPipe`/`UnexpectedEof` and forbids a direct retry. A timeout
+  does not cancel an already queued signal; it may be delivered later. `Ok`
+  acknowledges this exact request: non-reused u32 request IDs distinguish even
+  repeated signals. Stale replies are consumed and discarded; partial reply
+  bytes are retained across deadlines, and a zero-length read detects EOF
+  without relying on `POLLHUP`. Zero/oversized timeouts and request-ID exhaustion
+  are rejected.
+- While the helper holds its anchor, `process_group_exists` reports the group
+  present even after every workload member has gone. A group whose only member is the
+  anchor has nothing live to signal; macOS, which skips zombie members,
+  answers a signal to it with `EPERM`. Disarming releases the pin, so a
+  disarmed group's ID may be reused and must never be signalled again. The helper
+  gives every catchable signal exec-like dispositions before forking the anchor:
+  application handlers become `SIG_DFL`, and ignored signals stay ignored except
+  `SIGCHLD` (default to retain the zombie) and `SIGCONT` (default for cleanup).
+  The helper, a post-fork child limited to async-signal-safe calls, then never
+  calls `fork(3)`, which would run the application's `pthread_atfork` handlers
+  inside it after the anchor exists. Linux and Android on architectures whose
+  raw `clone` returns 0 in the child (x86, x86-64, Arm, AArch64, RISC-V,
+  PowerPC, MIPS, LoongArch, s390x) fork the anchor with the system call, flags
+  and argument layout the C library's own `fork` uses (glibc and bionic:
+  `clone` with `CHILD_SETTID | CHILD_CLEARTID | SIGCHLD` and zero unused
+  arguments; musl: `SYS_fork`, or `clone(SIGCHLD)` where none exists), so a
+  sandbox that filters these permits the anchor. Only the child TID address
+  differs from glibc's; it is a per-process address under address
+  randomization, so only a filter built inside the running process could
+  refuse it. FreeBSD uses `rfork`; the anchor only calls `setpgid` and `_exit`. Other
+  Linux architectures (SPARC returns the parent's PID in the child; m68k, C-SKY
+  and Hexagon are unverified) and every other target, including macOS, NetBSD,
+  OpenBSD and DragonFly, use `posix_spawn` of `/usr/bin/true` into a new group,
+  with default dispositions and an empty mask (and close-on-exec by default on
+  macOS); the owner prepares the attributes before the helper fork, and the
+  exited `true` is the zombie. The helper's own creation remains an ordinary
+  fork whose child callbacks run before it sanitizes itself, exactly as for
+  the public fork APIs. Thus neither an inherited signal handler nor a
+  registered fork callback can collect the helper's anchor, and nothing but the
+  helper can reap it. On the `posix_spawn` targets guard creation requires that
+  `/usr/bin/true` can be executed, and on Linux that the C library's spawn
+  process creation (`clone3` or a vfork-style `clone`) is permitted; a sandbox
+  that denies either makes creation fail.
+  The owner's handlers and mask are untouched.
+  A signal whose default terminates the helper can still cause helper loss; that
+  disables delivery, never authorizes an unpinned numeric fallback.
+- After the final helper-mediated kill, disarm to release the anchor before
+  waiting with `process_group_exists` and a deadline: the armed anchor itself
+  otherwise keeps the probe true. Never signal the group after disarming.
+  Do not assume the group is empty: a member can still be exiting, or be an
+  unreaped zombie whose parent is outside the group. Stop at the first absent
+  answer and never signal the group again.
 - The portable boundary is the process group, not every possible descendant.
   A workload which calls `setsid` or joins another group has escaped. Use an
   operating-system-specific facility such as a FreeBSD process reaper or Linux
@@ -281,7 +378,49 @@ On Linux and the supported BSDs, close-on-exec is set atomically when each
 endpoint is created. macOS requires a `fcntl` fallback, so construct broker IPC
 before starting threads that could concurrently execute another program.
 
+### Explicit Owner Policy at Startup
+
+`children_are_waitable()` reads the current process's `SIGCHLD` disposition.
+It returns false for explicit ignoring or `SA_NOCLDWAIT`, and does not change
+state. This snapshot is not child ownership or synchronization.
+
+A supervisor can deliberately call `ensure_waitable_children()` while still
+single-threaded, before children or signal handlers depending on that state
+exist. An ignored `SIGCHLD` survives `exec`, so launch environments can otherwise
+make checked daemonization reject the owner and prevent numeric-PID cleanup of
+spawned children or guard helpers. Guard/spawn creation and helper-mediated group
+delivery remain supported without correction. The function returns true if it restored
+`SIG_DFL` with an empty handler mask and no flags; otherwise it returns false
+and leaves an existing valid handler untouched. It does not alter the calling
+thread's signal mask or recover already auto-reaped children. Both functions
+propagate OS errors and retry interrupted `sigaction` calls.
+
+This is an explicit process-wide policy choice, never an implicit side effect
+of checked creation. Afterwards the owner must keep children waitable and
+serialize policy changes and child collection throughout every checked
+operation and guard lifetime. A handler must not steal these child events.
+
 ### Prepared Fork and Exec
+
+Prepared spawn's pipe handshake works with `SIGCHLD=SIG_IGN` and `SA_NOCLDWAIT`,
+as in 0.10.0. Failure cleanup only signals a child PID if owner policy and an
+unreaped child pin permit it; a stopped or unfinished child may instead be
+reported in `cleanup_pending` without being killed. Returned IDs are not signal
+capabilities. Serialize policy changes and collection across cleanup.
+
+Checked daemonization requires collection of its intermediate, so it still
+rejects auto-reaping before fork at `SignalState` with `InvalidInput`. In 0.10.0
+this policy already made the original invoker fail after creating a daemon;
+the earlier rejection removes unsafe cleanup, not a successful outcome. No
+handler or concurrent waiter may reap its intermediate. The checked
+daemon prefers `waitid(WNOWAIT)` to leave a failed intermediate unreaped until
+cleanup has sent every signal. If `waitid` fails with any errno (sandboxes
+answer `ENOSYS`, `EPERM` or `EACCES`; a kernel without `WNOWAIT` answers
+`EINVAL`), an exact-child consuming wait preserves the old successful daemon path. Consuming an
+unexpected exit removes the pin, so cleanup sends neither PID nor group signals
+and reports any remaining group as an observation-only obligation. Other cleanup
+paths also retain and handle consumed terminal outcomes instead of losing them.
+Returned pending groups never authorize signals to an ID whose pin was released.
 
 `PreparedCommand` is an additive API for a dedicated, single-threaded process
 broker. It snapshots the environment and materializes the executable path,

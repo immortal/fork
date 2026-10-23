@@ -12,8 +12,8 @@ use std::{
 
 use fork::{
     ChildEvent, PreparedCommand, ProcessFork, ProcessGroup, ProcessGroupGuard, ProcessId, Signal,
-    close_fd, fork_process, join_process_group, setsid, signal_process, signal_process_group,
-    wait_event, wait_event_nohang,
+    close_fd, fork_process, join_process_group, process_group_exists, setsid, signal_process,
+    signal_process_group, wait_event, wait_event_nohang,
 };
 
 const CLEANUP_TIMEOUT: Duration = Duration::from_secs(3);
@@ -73,8 +73,30 @@ fn process_group_guard_contains_owner_loss_and_disarms_cleanly() -> Result<(), B
     )?;
     require_case(
         "stopped helper cleanup preserves the workload",
-        stopped_helper_is_terminated_without_touching_workload(),
+        stopped_helper_is_resumed_without_touching_workload(),
     )?;
+    require_case(
+        "stopped helper Drop kills workload",
+        stopped_helper_drop_kills_workload(),
+    )?;
+    require_case(
+        "consumed STOP then disarm",
+        consumed_stop_disarm_preserves_workload(),
+    )?;
+    require_case(
+        "consumed STOP then Drop",
+        consumed_stop_drop_kills_workload(),
+    )?;
+    require_case("helper-mediated signals", helper_signals_live_workload())?;
+    require_case(
+        "dead helper rejects signals",
+        dead_helper_rejects_group_signal(),
+    )?;
+    require_case(
+        "stopped helper signal deadline",
+        stopped_helper_signal_times_out(),
+    )?;
+    require_case("anchor-only signal", anchor_only_group_signal())?;
     require_case(
         "dead helper disarm avoids SIGPIPE",
         dead_helper_makes_disarm_error_without_sigpipe(),
@@ -83,6 +105,60 @@ fn process_group_guard_contains_owner_loss_and_disarms_cleanly() -> Result<(), B
         "session escape remains outside containment",
         session_escape_is_explicitly_outside_group_containment(),
     )?;
+    require_case(
+        "an armed guard pins its emptied group",
+        armed_guard_pins_its_group_after_the_workload_is_gone(),
+    )?;
+    require_case(
+        "owner loss releases a pinned, emptied group",
+        owner_loss_releases_a_pinned_group_after_the_workload_is_gone(),
+    )?;
+    Ok(())
+}
+
+/// An armed guard keeps its group, and so its ID, reserved after every
+/// workload member is gone, through an anchor that is not the owner's child;
+/// disarming releases it.
+fn armed_guard_pins_its_group_after_the_workload_is_gone() -> Result<(), Box<dyn Error>> {
+    let mut guard = ProcessGroupGuard::new()?;
+    let group = guard.process_group();
+    let mut workload = WorkloadGuard::new(spawn_workload(group)?);
+    guard.activate(CLEANUP_TIMEOUT)?;
+    signal_process(workload.process(), Signal::KILL)?;
+    require_killed(workload.process())?;
+    workload.mark_reaped();
+
+    if !process_group_exists(group)? {
+        return Err(io::Error::other("an armed guard let its emptied group vanish").into());
+    }
+    let anchor = ProcessId::new(group.get())
+        .ok_or_else(|| io::Error::other("the reserved group ID is not a process ID"))?;
+    require_not_a_child(anchor)?;
+
+    guard.disarm(CLEANUP_TIMEOUT)?;
+    if process_group_exists(group)? {
+        return Err(io::Error::other("disarm left the emptied group reserved").into());
+    }
+    Ok(())
+}
+
+/// Owner loss after the workload is gone kills only the pinned group, then
+/// releases it and leaves no helper behind.
+fn owner_loss_releases_a_pinned_group_after_the_workload_is_gone() -> Result<(), Box<dyn Error>> {
+    let mut guard = ProcessGroupGuard::new()?;
+    let group = guard.process_group();
+    let helper = guard.guard_process();
+    let mut workload = WorkloadGuard::new(spawn_workload(group)?);
+    guard.activate(CLEANUP_TIMEOUT)?;
+    signal_process(workload.process(), Signal::KILL)?;
+    require_killed(workload.process())?;
+    workload.mark_reaped();
+
+    drop(guard);
+    require_not_a_child(helper)?;
+    if process_group_exists(group)? {
+        return Err(io::Error::other("owner loss left the pinned group reserved").into());
+    }
     Ok(())
 }
 
@@ -159,27 +235,138 @@ fn terminal_group_signal_does_not_disable_guard(signal: Signal) -> Result<(), Bo
     Ok(())
 }
 
-fn stopped_helper_is_terminated_without_touching_workload() -> Result<(), Box<dyn Error>> {
+fn stopped_helper_is_resumed_without_touching_workload() -> Result<(), Box<dyn Error>> {
     let mut guard = ProcessGroupGuard::new()?;
     let mut workload = WorkloadGuard::new(spawn_workload(guard.process_group())?);
     guard.activate(CLEANUP_TIMEOUT)?;
     let helper = guard.guard_process();
     signal_process(helper, Signal::STOP)?;
     wait_for_stopped_without_reaping(helper)?;
-    let error = guard
-        .disarm(CLEANUP_TIMEOUT)
-        .err()
-        .ok_or_else(|| io::Error::other("stopped helper accepted clean disarm"))?;
-    if error.kind() != io::ErrorKind::Other {
-        return Err(
-            io::Error::other(format!("stopped helper returned unexpected error: {error}")).into(),
-        );
-    }
+    guard.disarm(CLEANUP_TIMEOUT)?;
     require_not_a_child(helper)?;
     if wait_event_nohang(workload.process())?.is_some() {
         return Err(io::Error::other("stopped helper cleanup terminated the workload").into());
     }
     terminate_workload(&mut workload)
+}
+
+/// EOF cleanup must run in the resumed helper, not just kill the helper.
+fn stopped_helper_drop_kills_workload() -> Result<(), Box<dyn Error>> {
+    let guard = ProcessGroupGuard::new()?;
+    let helper = guard.guard_process();
+    let mut workload = WorkloadGuard::new(spawn_workload(guard.process_group())?);
+    signal_process(helper, Signal::STOP)?;
+    wait_for_stopped_without_reaping(helper)?;
+    drop(guard);
+    require_killed(workload.process())?;
+    workload.mark_reaped();
+    require_not_a_child(helper)
+}
+
+/// A broker drain uses waitpid(WUNTRACED), consuming STOP rather than leaving
+/// it waitable with WNOWAIT. Cleanup must resume even without another event.
+fn consumed_stop_disarm_preserves_workload() -> Result<(), Box<dyn Error>> {
+    let guard = ProcessGroupGuard::new()?;
+    let helper = guard.guard_process();
+    let mut workload = WorkloadGuard::new(spawn_workload(guard.process_group())?);
+    signal_process(helper, Signal::STOP)?;
+    require_event(helper, |event| matches!(event, ChildEvent::Stopped { .. }))?;
+    guard.disarm(Duration::from_millis(250))?;
+    require_not_a_child(helper)?;
+    assert!(wait_event_nohang(workload.process())?.is_none());
+    terminate_workload(&mut workload)
+}
+
+/// Consuming a helper's stop event must not disable fail-closed armed Drop.
+fn consumed_stop_drop_kills_workload() -> Result<(), Box<dyn Error>> {
+    let guard = ProcessGroupGuard::new()?;
+    let helper = guard.guard_process();
+    let mut workload = WorkloadGuard::new(spawn_workload(guard.process_group())?);
+    signal_process(helper, Signal::STOP)?;
+    require_event(helper, |event| matches!(event, ChildEvent::Stopped { .. }))?;
+    drop(guard);
+    require_killed(workload.process())?;
+    workload.mark_reaped();
+    require_not_a_child(helper)
+}
+
+/// Delivery crosses the socket and preserves the guard after a terminal signal.
+fn helper_signals_live_workload() -> Result<(), Box<dyn Error>> {
+    let guard = ProcessGroupGuard::new()?;
+    let mut workload = WorkloadGuard::new(spawn_workload(guard.process_group())?);
+    for timeout in [Duration::ZERO, Duration::MAX] {
+        let result = guard.signal_group(Signal::KILL, timeout);
+        assert!(matches!(result, Err(error) if error.kind() == io::ErrorKind::InvalidInput));
+    }
+    guard.signal_group(Signal::TERM, CLEANUP_TIMEOUT)?;
+    require_event(workload.process(), |event| {
+        matches!(
+            event,
+            ChildEvent::Signalled {
+                signal: Signal::TERM,
+                ..
+            }
+        )
+    })?;
+    workload.mark_reaped();
+    require_helper_running(guard.guard_process())?;
+    guard.disarm(CLEANUP_TIMEOUT)?;
+    Ok(())
+}
+
+/// Even before the guard observes helper loss, no direct group kill is sent.
+fn dead_helper_rejects_group_signal() -> Result<(), Box<dyn Error>> {
+    let guard = ProcessGroupGuard::new()?;
+    let mut workload = WorkloadGuard::new(spawn_workload(guard.process_group())?);
+    signal_process(guard.guard_process(), Signal::KILL)?;
+    require_killed(guard.guard_process())?;
+    let result = guard.signal_group(Signal::KILL, CLEANUP_TIMEOUT);
+    assert!(matches!(&result, Err(error) if matches!(error.kind(),
+        io::ErrorKind::BrokenPipe | io::ErrorKind::UnexpectedEof)));
+    assert!(
+        result
+            .err()
+            .is_some_and(|error| error.to_string().contains("must not be signalled directly"))
+    );
+    assert!(wait_event_nohang(workload.process())?.is_none());
+    drop(guard);
+    terminate_workload(&mut workload)
+}
+
+/// A stopped helper cannot deliver; after resume a different request skips
+/// the old reply rather than confusing it with the current signal's result.
+fn stopped_helper_signal_times_out() -> Result<(), Box<dyn Error>> {
+    let guard = ProcessGroupGuard::new()?;
+    let mut workload = WorkloadGuard::new(spawn_workload(guard.process_group())?);
+    signal_process(guard.guard_process(), Signal::STOP)?;
+    wait_for_stopped_without_reaping(guard.guard_process())?;
+    let start = Instant::now();
+    let result = guard.signal_group(Signal::STOP, Duration::from_millis(50));
+    assert!(matches!(result, Err(error) if error.kind() == io::ErrorKind::TimedOut));
+    assert!(start.elapsed() < Duration::from_millis(500));
+    assert!(wait_event_nohang(workload.process())?.is_none());
+    signal_process(guard.guard_process(), Signal::CONT)?;
+    require_event(workload.process(), |event| {
+        matches!(event, ChildEvent::Stopped { .. })
+    })?;
+    guard.signal_group(Signal::CONT, CLEANUP_TIMEOUT)?;
+    require_event(workload.process(), |event| {
+        matches!(event, ChildEvent::Continued { .. })
+    })?;
+    guard.disarm(CLEANUP_TIMEOUT)?;
+    terminate_workload(&mut workload)
+}
+
+/// macOS returns EPERM when only the zombie anchor remains.
+fn anchor_only_group_signal() -> Result<(), Box<dyn Error>> {
+    let guard = ProcessGroupGuard::new()?;
+    let result = guard.signal_group(Signal::TERM, CLEANUP_TIMEOUT);
+    assert!(
+        result.is_ok() || matches!(result, Err(error) if error.raw_os_error() == Some(libc::EPERM))
+    );
+    assert!(process_group_exists(guard.process_group())?);
+    guard.disarm(CLEANUP_TIMEOUT)?;
+    Ok(())
 }
 
 fn oversized_timeout_is_rejected_fail_closed() -> Result<(), Box<dyn Error>> {
@@ -282,12 +469,17 @@ fn dead_helper_makes_disarm_error_without_sigpipe() -> Result<(), Box<dyn Error>
         .disarm(CLEANUP_TIMEOUT)
         .err()
         .ok_or_else(|| io::Error::other("dead helper accepted explicit disarm"))?;
-    if error.raw_os_error() != Some(libc::EPIPE) {
+    // The anchor can briefly retain the peer socket before its initial exit.
+    // Then the disarm byte is accepted, but waiting for the externally reaped
+    // helper returns ECHILD instead of the send returning EPIPE. Both are
+    // consuming failures; neither authorizes a direct workload/group signal.
+    if !matches!(error.raw_os_error(), Some(libc::EPIPE | libc::ECHILD)) {
         return Err(io::Error::other(format!(
             "dead helper returned unexpected disarm error: {error}"
         ))
         .into());
     }
+    assert!(wait_event_nohang(workload.process())?.is_none());
 
     signal_process(workload.process(), Signal::KILL)?;
     require_killed(workload.process())?;

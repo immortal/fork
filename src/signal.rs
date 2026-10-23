@@ -10,7 +10,8 @@ use crate::{ProcessGroupId, ProcessId};
 ///
 /// Associated constants cover the portable signals used by process
 /// supervisors. [`Signal::new`] also permits platform-specific positive signal
-/// numbers while preventing signal zero from being used as a process probe.
+/// numbers while preventing signal zero from being used as a process probe;
+/// group membership is checked through [`process_group_exists`] instead.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 #[repr(transparent)]
 pub struct Signal(libc::c_int);
@@ -109,19 +110,88 @@ pub fn signal_process(process: ProcessId, signal: Signal) -> io::Result<()> {
 ///
 /// The public API accepts only a positive [`ProcessGroupId`]; conversion to the
 /// negative `kill(2)` representation remains private and cannot be confused
-/// with process delivery.
+/// with process delivery. Group 1 is refused: `kill(-1, ..)` is the POSIX
+/// broadcast to every process the caller may signal, never a group selector.
 ///
 /// # Errors
 ///
-/// Returns the underlying `kill(2)` error.
+/// Returns [`io::ErrorKind::InvalidInput`] for group 1 and otherwise the
+/// underlying `kill(2)` error.
 pub fn signal_process_group(group: ProcessGroupId, signal: Signal) -> io::Result<()> {
-    kill_retry(-group.get(), signal)
+    kill_retry(group_target(group)?, signal)
+}
+
+/// Report whether any process, including an unreaped zombie, belongs to `group`.
+///
+/// This is the POSIX null-signal check `kill(-pgid, 0)`: existence and
+/// permission are verified and nothing is delivered. A member the caller may
+/// not signal (`EPERM`) still counts as present. An exited member stays in its
+/// group until its parent reaps it, so a group holding only zombies is reported
+/// present until they are reaped; macOS skips zombie members and answers such a
+/// group with `EPERM`, which is reported present as well.
+///
+/// The answer is a point-in-time observation. Once a group has emptied, the
+/// kernel may hand its numeric ID to an unrelated group, so `true` never proves
+/// that the original group still exists and must never be the reason to signal
+/// it. Stop probing at the first `false`. The ID is only stable while the
+/// caller pins it, for example with an unreaped zombie member, an unreaped
+/// child whose PID equals the PGID, or an armed [`crate::ProcessGroupGuard`].
+/// A live nonleader's membership snapshot is not a pin: it can leave immediately
+/// after a `getpgid` observation.
+///
+/// # Errors
+///
+/// Returns [`io::ErrorKind::InvalidInput`] for group 1 (`kill(-1, ..)` is a
+/// broadcast, not a group selector) and any `kill(2)` error other than
+/// `ESRCH`, `EPERM`, or `EINTR`, which is retried.
+pub fn process_group_exists(group: ProcessGroupId) -> io::Result<bool> {
+    let target = group_target(group)?;
+    loop {
+        // SAFETY: `target` comes from `group_target`, the private negation of a
+        // checked group ID other than 1, so it selects exactly that group and
+        // never the broadcast target; signal zero delivers nothing.
+        if unsafe { libc::kill(target, 0) } == 0 {
+            return Ok(true);
+        }
+        if let Some(outcome) = classify_probe_errno(io::Error::last_os_error()) {
+            return outcome;
+        }
+    }
+}
+
+/// Convert a checked group ID into its private negative `kill(2)` target.
+///
+/// Group 1 is refused because `kill(-1, ..)` addresses every process the
+/// caller may signal rather than one group.
+fn group_target(group: ProcessGroupId) -> io::Result<libc::pid_t> {
+    if group.get() == 1 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "process group 1 cannot be targeted: kill(-1) is a broadcast",
+        ));
+    }
+    Ok(-group.get())
+}
+
+/// Interpret one failed `kill(target, 0)` for [`process_group_exists`].
+///
+/// `None` asks the caller to retry an interrupted call. Every error other than
+/// a definite absence keeps the group present or is returned, so a caller
+/// waiting for a group to empty fails closed rather than finishing early.
+fn classify_probe_errno(error: io::Error) -> Option<io::Result<bool>> {
+    match error.raw_os_error() {
+        Some(libc::EPERM) => Some(Ok(true)),
+        Some(libc::ESRCH) => Some(Ok(false)),
+        Some(libc::EINTR) => None,
+        _ => Some(Err(error)),
+    }
 }
 
 fn kill_retry(target: libc::pid_t, signal: Signal) -> io::Result<()> {
     loop {
-        // SAFETY: `target` is derived from a checked positive process ID or the
-        // private negation of a checked group ID; `signal` cannot be zero.
+        // SAFETY: `target` is derived from a checked positive process ID or from
+        // `group_target`, which never yields the broadcast target `-1`; `signal`
+        // cannot be zero.
         if unsafe { libc::kill(target, signal.get()) } == 0 {
             return Ok(());
         }
@@ -134,12 +204,40 @@ fn kill_retry(target: libc::pid_t, signal: Signal) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::Signal;
+    use std::{error::Error, io};
+
+    use super::{Signal, classify_probe_errno, group_target};
+    use crate::ProcessGroupId;
 
     #[test]
     fn signals_reject_probe_and_negative_values() {
         assert_eq!(Signal::new(0), None);
         assert_eq!(Signal::new(-1), None);
+    }
+
+    #[test]
+    fn group_target_rejects_the_broadcast_group() -> Result<(), Box<dyn Error>> {
+        let broadcast = ProcessGroupId::new(1).ok_or("group 1 must be representable")?;
+        let refused = group_target(broadcast)
+            .err()
+            .ok_or("group 1 must never become a kill(2) target")?;
+        assert_eq!(refused.kind(), io::ErrorKind::InvalidInput);
+
+        let group = ProcessGroupId::new(4242).ok_or("group 4242 must be representable")?;
+        assert_eq!(group_target(group)?, -4242);
+        Ok(())
+    }
+
+    #[test]
+    fn probe_errno_classification_fails_closed() {
+        let classify = |errno| classify_probe_errno(io::Error::from_raw_os_error(errno));
+        assert!(matches!(classify(libc::EPERM), Some(Ok(true))));
+        assert!(matches!(classify(libc::ESRCH), Some(Ok(false))));
+        assert!(classify(libc::EINTR).is_none());
+        assert!(matches!(
+            classify(libc::EINVAL),
+            Some(Err(error)) if error.raw_os_error() == Some(libc::EINVAL)
+        ));
     }
 
     #[test]

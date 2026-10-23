@@ -10,20 +10,25 @@
 
 /// Tests for stdio redirection to /dev/null
 /// These tests verify that file descriptors 0,1,2 are not reused after closing stdio
-use std::{fs::File, io::Write, os::unix::io::AsRawFd, process::exit};
+use std::{fs::File, io::Write, os::unix::io::AsRawFd, path::PathBuf, process::exit};
 
 use fork::{Fork, close_fd, fork, waitpid};
 
 const FD_REUSE_FILES: [&str; 4] = [
-    "/tmp/fork_test_fd_marker.txt",
-    "/tmp/fork_test_fd1.txt",
-    "/tmp/fork_test_fd2.txt",
-    "/tmp/fork_test_fd3.txt",
+    "fork_test_fd_marker.txt",
+    "fork_test_fd1.txt",
+    "fork_test_fd2.txt",
+    "fork_test_fd3.txt",
 ];
+
+/// Share the configured scratch root across parent, forked child and daemon.
+fn temporary_file(name: &str) -> PathBuf {
+    std::env::temp_dir().join(name)
+}
 
 fn remove_fd_reuse_files() {
     for path in FD_REUSE_FILES {
-        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(temporary_file(path));
     }
 }
 
@@ -43,7 +48,7 @@ fn test_close_fd_allows_fd_reuse() {
             let result = waitpid(child);
             // If child exited with error, the bug exists
             let descriptors_were_reused = result.is_err()
-                || std::fs::read_to_string("/tmp/fork_test_fd_marker.txt")
+                || std::fs::read_to_string(temporary_file("fork_test_fd_marker.txt"))
                     .unwrap_or_default()
                     .contains("REUSED");
             remove_fd_reuse_files();
@@ -58,9 +63,9 @@ fn test_close_fd_allows_fd_reuse() {
             close_fd().unwrap();
 
             // Open files - with current implementation, they WILL get fd 0,1,2
-            let f1 = File::create("/tmp/fork_test_fd1.txt").unwrap();
-            let f2 = File::create("/tmp/fork_test_fd2.txt").unwrap();
-            let f3 = File::create("/tmp/fork_test_fd3.txt").unwrap();
+            let f1 = File::create(temporary_file("fork_test_fd1.txt")).unwrap();
+            let f2 = File::create(temporary_file("fork_test_fd2.txt")).unwrap();
+            let f3 = File::create(temporary_file("fork_test_fd3.txt")).unwrap();
 
             let fd1 = f1.as_raw_fd();
             let fd2 = f2.as_raw_fd();
@@ -69,7 +74,7 @@ fn test_close_fd_allows_fd_reuse() {
             // Check if any fd is < 3 (the bug)
             if fd1 < 3 || fd2 < 3 || fd3 < 3 {
                 // Write marker file to signal bug to parent
-                std::fs::write("/tmp/fork_test_fd_marker.txt", "REUSED").ok();
+                std::fs::write(temporary_file("fork_test_fd_marker.txt"), "REUSED").ok();
                 exit(1);
             }
 
@@ -90,8 +95,10 @@ fn test_fd_reuse_corruption_scenario() {
             waitpid(child).unwrap();
 
             // Check what was written to the files
-            let content1 = std::fs::read_to_string("/tmp/fork_test_corruption1.txt").ok();
-            let content2 = std::fs::read_to_string("/tmp/fork_test_corruption2.txt").ok();
+            let content1 =
+                std::fs::read_to_string(temporary_file("fork_test_corruption1.txt")).ok();
+            let content2 =
+                std::fs::read_to_string(temporary_file("fork_test_corruption2.txt")).ok();
 
             if let (Some(c1), Some(c2)) = (content1, content2) {
                 // With close_fd(), these files will contain the debug output!
@@ -107,16 +114,16 @@ fn test_fd_reuse_corruption_scenario() {
             }
 
             // Cleanup
-            let _ = std::fs::remove_file("/tmp/fork_test_corruption1.txt");
-            let _ = std::fs::remove_file("/tmp/fork_test_corruption2.txt");
+            let _ = std::fs::remove_file(temporary_file("fork_test_corruption1.txt"));
+            let _ = std::fs::remove_file(temporary_file("fork_test_corruption2.txt"));
         }
         Ok(Fork::Child) => {
             // Close stdio
             close_fd().unwrap();
 
             // Open files - they will get fd 0,1,2 with current implementation
-            let mut f1 = File::create("/tmp/fork_test_corruption1.txt").unwrap();
-            let mut f2 = File::create("/tmp/fork_test_corruption2.txt").unwrap();
+            let mut f1 = File::create(temporary_file("fork_test_corruption1.txt")).unwrap();
+            let mut f2 = File::create(temporary_file("fork_test_corruption2.txt")).unwrap();
 
             // Try to write debug output to stderr (fd=2)
             // With close_fd(), this might go to one of the files above!
@@ -156,9 +163,9 @@ fn test_redirect_stdio_prevents_fd_reuse() {
             fork::redirect_stdio().unwrap();
 
             // Open files - should get fd >= 3
-            let f1 = File::create("/tmp/fork_test_redirect1.txt").unwrap();
-            let f2 = File::create("/tmp/fork_test_redirect2.txt").unwrap();
-            let f3 = File::create("/tmp/fork_test_redirect3.txt").unwrap();
+            let f1 = File::create(temporary_file("fork_test_redirect1.txt")).unwrap();
+            let f2 = File::create(temporary_file("fork_test_redirect2.txt")).unwrap();
+            let f3 = File::create(temporary_file("fork_test_redirect3.txt")).unwrap();
 
             let fd1 = f1.as_raw_fd();
             let fd2 = f2.as_raw_fd();
@@ -173,9 +180,9 @@ fn test_redirect_stdio_prevents_fd_reuse() {
             drop(f1);
             drop(f2);
             drop(f3);
-            let _ = std::fs::remove_file("/tmp/fork_test_redirect1.txt");
-            let _ = std::fs::remove_file("/tmp/fork_test_redirect2.txt");
-            let _ = std::fs::remove_file("/tmp/fork_test_redirect3.txt");
+            let _ = std::fs::remove_file(temporary_file("fork_test_redirect1.txt"));
+            let _ = std::fs::remove_file(temporary_file("fork_test_redirect2.txt"));
+            let _ = std::fs::remove_file(temporary_file("fork_test_redirect3.txt"));
 
             exit(0);
         }
@@ -190,19 +197,20 @@ fn test_redirect_stdio_println_safety() {
             waitpid(child).unwrap();
 
             // Verify files only contain intended data
-            let content = std::fs::read_to_string("/tmp/fork_test_println_safe.txt").unwrap();
+            let content =
+                std::fs::read_to_string(temporary_file("fork_test_println_safe.txt")).unwrap();
             assert!(!content.contains("debug"), "Debug output leaked to file!");
             assert_eq!(content, "data\n", "File content is correct");
 
             // Cleanup
-            let _ = std::fs::remove_file("/tmp/fork_test_println_safe.txt");
+            let _ = std::fs::remove_file(temporary_file("fork_test_println_safe.txt"));
         }
         Ok(Fork::Child) => {
             // Redirect stdio to /dev/null
             fork::redirect_stdio().unwrap();
 
             // Open file - gets fd >= 3
-            let mut f = File::create("/tmp/fork_test_println_safe.txt").unwrap();
+            let mut f = File::create(temporary_file("fork_test_println_safe.txt")).unwrap();
 
             // This println! will go to /dev/null (fd=1), not to the file
             println!("debug message that should not appear in file");
@@ -228,7 +236,7 @@ fn test_daemon_uses_redirect_stdio() {
             std::thread::sleep(std::time::Duration::from_millis(100));
 
             // Check file was created and has correct content
-            let content = std::fs::read_to_string("/tmp/fork_test_daemon_redirect.txt")
+            let content = std::fs::read_to_string(temporary_file("fork_test_daemon_redirect.txt"))
                 .expect("Daemon should have created file");
 
             assert!(
@@ -242,7 +250,7 @@ fn test_daemon_uses_redirect_stdio() {
             );
 
             // Cleanup
-            let _ = std::fs::remove_file("/tmp/fork_test_daemon_redirect.txt");
+            let _ = std::fs::remove_file(temporary_file("fork_test_daemon_redirect.txt"));
         }
         Ok(Fork::Child) => {
             // Simulate what daemon() does
@@ -253,7 +261,8 @@ fn test_daemon_uses_redirect_stdio() {
                 Ok(Fork::Parent(_)) => exit(0), // First child exits
                 Ok(Fork::Child) => {
                     // Grandchild (daemon) continues
-                    let mut f = File::create("/tmp/fork_test_daemon_redirect.txt").unwrap();
+                    let mut f =
+                        File::create(temporary_file("fork_test_daemon_redirect.txt")).unwrap();
 
                     // Verify file got fd >= 3
                     assert!(f.as_raw_fd() >= 3, "File should get fd >= 3");
@@ -314,12 +323,12 @@ fn test_redirect_stdio_idempotent() {
             fork::redirect_stdio().unwrap();
 
             // Files should still get fd >= 3
-            let f = File::create("/tmp/fork_test_idempotent.txt").unwrap();
+            let f = File::create(temporary_file("fork_test_idempotent.txt")).unwrap();
             assert!(f.as_raw_fd() >= 3, "File should get fd >= 3");
 
             // Cleanup
             drop(f);
-            let _ = std::fs::remove_file("/tmp/fork_test_idempotent.txt");
+            let _ = std::fs::remove_file(temporary_file("fork_test_idempotent.txt"));
 
             exit(0);
         }
