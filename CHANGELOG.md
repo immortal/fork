@@ -1,3 +1,16 @@
+## Unreleased
+
+### Documentation
+* The 0.11.0 compatibility audit below omitted one success-to-failure change.
+  Checked daemonization, guard disarm, and cleanup that may signal a child by
+  numeric PID now read the owner's SIGCHLD disposition with `sigaction` before
+  acting; 0.10.0 called `sigaction` only in a child resetting its signals. A
+  sandbox that denies `sigaction` therefore makes `checked_daemon` fail at
+  `DaemonStage::SignalState` and `disarm` return the error, and cleanup reports
+  its obligation instead of signalling, where 0.10.0 succeeded. The query is
+  how the owner proves exited children stay waitable, so these operations keep
+  failing closed and the code is unchanged.
+
 ## 0.11.0
 
 ### Added
