@@ -1,8 +1,10 @@
 ## Unreleased
 
 ### Documentation
-* The 0.11.0 compatibility audit below omitted one success-to-failure change.
-  Checked daemonization, guard disarm, and cleanup that may signal a child by
+The 0.11.0 compatibility audit below omitted two success-to-failure changes,
+both caused by system calls the owner now makes and 0.10.0 did not.
+
+* Checked daemonization, guard disarm, and cleanup that may signal a child by
   numeric PID now read the owner's SIGCHLD disposition with `sigaction` before
   acting; 0.10.0 called `sigaction` only in a child resetting its signals. A
   sandbox that denies `sigaction` therefore makes `checked_daemon` fail at
@@ -10,6 +12,43 @@
   its obligation instead of signalling, where 0.10.0 succeeded. The query is
   how the owner proves exited children stay waitable, so these operations keep
   failing closed and the code is unchanged.
+* The audit's `waitid` row covers only filters that return an errno. Checked
+  daemonization and guard disarm, including their successful paths, now call
+  `waitid(WNOWAIT)` in the owner before any `waitpid` fallback, and 0.10.0
+  never called `waitid`. A seccomp filter that kills on `waitid` therefore
+  terminates the owner with `SIGSYS` where 0.10.0 succeeded: `checked_daemon`
+  dies after its daemon reported ready, and an armed guard's disarm or drop
+  dies while the helper still runs. Cleanup after a failed spawn or daemon dies
+  instead of returning its error. No fallback can observe a killing filter, so
+  such a policy must permit `waitid`.
+
+### Under review
+Reported by a model review of the released 0.11.0 and not yet changed. Confirm
+each before the next release, then fix it or drop it.
+
+* Signal reset order: the guard helper closes its inherited descriptors before
+  `child_reset_signals`. If guard creation already failed because the helper
+  stalled or was stopped before its reset, cleanup's internal SIGCONT can run
+  the owner's inherited SIGCONT handler inside the helper, which the 0.11.0
+  Safety notes rule out. Resetting signals before the descriptor close removes
+  the window; otherwise narrow those notes.
+* Infinite soft NOFILE: without range closing, the descriptor fallback uses the
+  soft limit, saturated to `i32::MAX`, as its scan floor. The `/dev/fd`
+  inventory and the macOS `kern.maxfilesperproc` cap then never lower the
+  bound, and the child closes about 2^31 descriptors, taking minutes, instead
+  of failing closed as documented. No supported platform was found to report
+  that limit (Linux caps it at `nr_open`, macOS rejects or clamps it, FreeBSD
+  13+ closes ranges), and 0.10.0 behaved the same. Treating an infinite soft
+  limit as no floor would harden it.
+* `failed_intermediate_remains_unreaped_until_cleanup` asserts the
+  `waitid(WNOWAIT)` retention, so it fails in a sandbox that denies `waitid`
+  with an errno, where the documented consuming fallback is correct. The test
+  should accept the fallback outcome.
+* Error kinds: until a new anchor's initial exit, or while it is stopped, it
+  holds a copy of the helper's socket. A helper lost in that window gives the
+  owner no end of file, so `new` and `signal_group` return `TimedOut` instead
+  of the documented `UnexpectedEof` or `BrokenPipe`. Nothing is signalled; only
+  the reported error kind differs.
 
 ## 0.11.0
 
