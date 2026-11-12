@@ -49,6 +49,24 @@ each before the next release, then fix it or drop it.
   owner no end of file, so `new` and `signal_group` return `TimedOut` instead
   of the documented `UnexpectedEof` or `BrokenPipe`. Nothing is signalled; only
   the reported error kind differs.
+* Daemon handshake error: once `waitid(WNOWAIT)` has seen the intermediate
+  exit with status 0, checked daemonization collects it with a non-blocking
+  wait and maps every failure of that wait to `InvalidHandshake`. A sandbox
+  that permits `waitid` but denies `waitpid` therefore reports a malformed
+  handshake instead of `DaemonError::OperatingSystem` at
+  `DaemonStage::Handshake`, which 0.10.0 returned for the same wait error. The
+  call still fails; only the reported error differs.
+* Guard creation and `sigaction`: the helper now resets every signal
+  disposition with `sigaction` before it reserves the group and exits if a
+  call fails, so in a sandbox that denies `sigaction`
+  `ProcessGroupGuard::new` returns `UnexpectedEof` where 0.10.0, whose helper
+  reset nothing, succeeded. If confirmed, the Documentation entry above should
+  list guard creation with the other `sigaction` changes.
+* Unreaped helper: disarm and drop check the SIGCHLD disposition before they
+  wait for the helper. When that `sigaction` query fails they return without
+  the exact-child wait, so the helper, which still exits, stays a zombie until
+  the owner exits. Signalling nothing is the documented fail-closed behavior,
+  but an exact-child wait sends no signal and could still collect it.
 
 ## 0.11.0
 
