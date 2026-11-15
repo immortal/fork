@@ -22,6 +22,17 @@ both caused by system calls the owner now makes and 0.10.0 did not.
   instead of returning its error. No fallback can observe a killing filter, so
   such a policy must permit `waitid`.
 
+### Fixed
+* `PreparedCommand::spawn` with a timeout beyond the monotonic clock's range,
+  such as `Duration::MAX`, returned `TimedOut` at once and killed the child,
+  because the overflowing deadline fell back to the current instant. It now
+  waits for the handshake without a deadline.
+* `ProcessGroupGuard::disarm` cleaned up its helper and then dropped it, and
+  the drop repeated the cleanup against the already reaped PID. If the owner
+  had reused that PID for a new child, the child was resumed, then killed and
+  reaped after three seconds. Cleanup now runs once; a cleanup that could not
+  prove the helper gone is still retried on drop.
+
 ### Under review
 Reported by a model review of the released 0.11.0 and not yet changed. Confirm
 each before the next release, then fix it or drop it.
@@ -74,19 +85,10 @@ each before the next release, then fix it or drop it.
   then returns `BrokenPipe`, and the workload outlives the owner uncontained.
   Reproduced on Linux. Ignoring catchable signals in the helper, or moving it
   out of the owner's group, would keep the guard; otherwise document it.
-* Unbounded spawn timeout: `PreparedCommand::spawn(Duration::MAX)` returns
-  `TimedOut` at once and kills the child, because an overflowing deadline
-  falls back to the current instant. Checked daemonization saturates and the
-  guard rejects such a timeout. Reproduced on Linux.
 * Readiness and `SIGPIPE`: `DaemonNotifier::notify_ready` and `fail_and_exit`
   use a plain `write`. The default `ChildSignalState::Reset` restores
   `SIGPIPE`, so a daemon whose invoker is gone is killed inside the call
   instead of receiving the documented `EPIPE`. Reproduced on Linux.
-* Repeated helper cleanup: `disarm` cleans up the helper and then drops it,
-  and the drop repeats the cleanup against the already reaped PID. The second
-  wait normally fails with `ECHILD`; in a multithreaded owner that reused the
-  PID for a new child, that child could receive `SIGCONT` or `SIGKILL`. Found
-  by reading the code, not reproduced.
 
 ## 0.11.0
 

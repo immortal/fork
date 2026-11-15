@@ -231,6 +231,9 @@ impl Drop for ProcessGroupGuard {
 struct GuardHelper {
     owner: Option<OwnedFd>,
     process: ProcessId,
+    /// Set once cleanup reaped the helper or lost proof of owning it. Its PID
+    /// may then name another process, so cleanup must never run again.
+    retired: bool,
     exchange: Mutex<delivery::Exchange>,
 }
 
@@ -247,6 +250,7 @@ impl GuardHelper {
                 Ok(Self {
                     owner: Some(writer),
                     process,
+                    retired: false,
                     exchange: Mutex::new(delivery::Exchange::default()),
                 })
             }
@@ -331,15 +335,31 @@ impl GuardHelper {
         self.finish(timeout)
     }
 
-    fn finish(&self, timeout: Duration) -> io::Result<()> {
+    /// Wait for the helper, killing it at the deadline, at most once.
+    ///
+    /// Disarm cleans up and then drops the helper. Without `retired` the drop
+    /// would wait on, resume, and finally kill a PID that was already reaped
+    /// and may belong to a newer child. A cleanup that could not prove the
+    /// helper gone leaves it unretired, so the drop still retries.
+    fn finish(&mut self, timeout: Duration) -> io::Result<()> {
+        if self.retired {
+            return Ok(());
+        }
         crate::child_signal::require_waitable_children()?;
         match wait_for_clean_exit(self.process, timeout) {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                self.retired = true;
+                Ok(())
+            }
             Err(HelperWaitFailure::StillLive(error)) => {
                 self.terminate_and_reap()?;
+                self.retired = true;
                 Err(error)
             }
-            Err(HelperWaitFailure::ReapedOrUnknown(error)) => Err(error),
+            Err(HelperWaitFailure::ReapedOrUnknown(error)) => {
+                self.retired = true;
+                Err(error)
+            }
         }
     }
 
@@ -830,6 +850,39 @@ mod tests {
         }
         let result = super::write_disarm(owner.as_raw_fd());
         assert!(matches!(result, Err(error) if error.kind() == std::io::ErrorKind::WouldBlock));
+        Ok(())
+    }
+
+    /// Disarm reaps the helper and then drops it. The drop must not repeat
+    /// cleanup against the reaped PID, which may by then name a newer child:
+    /// stand in for that reuse with a live child and require it untouched.
+    #[test]
+    fn dropped_helper_does_not_repeat_cleanup_after_disarm() -> std::io::Result<()> {
+        use std::time::Duration;
+        let mut helper = super::GuardHelper::spawn()?;
+        helper.read_group(Duration::from_secs(3))?;
+        helper.disarm_and_reap(Duration::from_secs(3))?;
+        assert!(helper.retired);
+
+        let bystander = match crate::fork_process()? {
+            crate::ProcessFork::Parent(process) => process,
+            crate::ProcessFork::Child => loop {
+                // SAFETY: pause is async-signal-safe; the test kills this child.
+                unsafe { libc::pause() };
+            },
+        };
+        helper.process = bystander;
+        drop(helper);
+        let observed = crate::wait_event_nohang(bystander);
+        // Always clean up before asserting; a repeated cleanup already reaped it.
+        if matches!(observed, Ok(None)) {
+            crate::signal_process(bystander, crate::Signal::KILL)?;
+            crate::wait_event(bystander)?;
+        }
+        assert!(
+            matches!(observed, Ok(None)),
+            "repeated cleanup touched a reused helper PID: {observed:?}"
+        );
         Ok(())
     }
 
