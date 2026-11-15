@@ -242,8 +242,9 @@ impl DaemonNotifier {
     /// the record is sent with `MSG_NOSIGNAL`, so the default
     /// [`ChildSignalState::Reset`], which restores the terminating action of
     /// `SIGPIPE`, cannot kill the daemon here instead, and no signal state is
-    /// touched. Only where a sandbox refused the socket, and the channel fell
-    /// back to the pipe of 0.11.0, does a lost invoker still raise `SIGPIPE`.
+    /// touched. Where a sandbox refused the socket or the send, the record
+    /// goes through the pipe or the plain `write` of 0.11.0, and there a lost
+    /// invoker still raises `SIGPIPE`.
     pub fn notify_ready(self) -> io::Result<()> {
         write_record_without_sigpipe(
             self.descriptor.as_raw_fd(),
@@ -256,7 +257,8 @@ impl DaemonNotifier {
     ///
     /// The explicit name reflects that this method never returns and uses
     /// `_exit` so inherited application destructors are not run. A lost
-    /// invoker does not turn the exit into a `SIGPIPE` death.
+    /// invoker does not turn the exit into a `SIGPIPE` death, except on the
+    /// fallback paths described for [`Self::notify_ready`].
     pub fn fail_and_exit(self, error: &io::Error) -> ! {
         let errno = error.raw_os_error().unwrap_or(libc::EIO);
         let _ = write_record_without_sigpipe(

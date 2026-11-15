@@ -93,6 +93,10 @@ fn process_group_guard_contains_owner_loss_and_disarms_cleanly() -> Result<(), B
         catchable_signals_do_not_end_the_helper(),
     )?;
     require_case(
+        "an ignored fault signal stays ignored",
+        ignored_fault_signal_stays_ignored_in_the_helper(),
+    )?;
+    require_case(
         "dead helper rejects signals",
         dead_helper_rejects_group_signal(),
     )?;
@@ -348,6 +352,37 @@ fn catchable_signals_do_not_end_the_helper() -> Result<(), Box<dyn Error>> {
     guard.disarm(CLEANUP_TIMEOUT)?;
     require_not_a_child(helper)?;
     terminate_workload(&mut workload)
+}
+
+/// A fault signal keeps its default action in the helper unless the owner
+/// ignored it: then it stays ignored, as in 0.11.0, so the same signal sent
+/// from outside cannot end a helper it did not end before.
+fn ignored_fault_signal_stays_ignored_in_the_helper() -> Result<(), Box<dyn Error>> {
+    // SAFETY: changes one disposition of this single-threaded test process
+    // and restores it below.
+    let previous = unsafe { libc::signal(libc::SIGTRAP, libc::SIG_IGN) };
+    if previous == libc::SIG_ERR {
+        return Err(io::Error::last_os_error().into());
+    }
+    let outcome = (|| -> Result<(), Box<dyn Error>> {
+        let guard = ProcessGroupGuard::new()?;
+        let helper = guard.guard_process();
+        let trap = Signal::new(libc::SIGTRAP).ok_or("SIGTRAP is not a valid signal")?;
+        signal_process(helper, trap)?;
+        // A completed exchange proves the helper outlived the pending signal.
+        match guard.signal_group(Signal::CONT, CLEANUP_TIMEOUT) {
+            Ok(()) => {}
+            // macOS answers EPERM for a group whose only member is the anchor.
+            Err(error) if error.raw_os_error() == Some(libc::EPERM) => {}
+            Err(error) => return Err(error.into()),
+        }
+        require_helper_running(helper)?;
+        guard.disarm(CLEANUP_TIMEOUT)?;
+        require_not_a_child(helper)
+    })();
+    // SAFETY: restores the disposition saved above.
+    unsafe { libc::signal(libc::SIGTRAP, previous) };
+    outcome
 }
 
 fn dead_helper_rejects_group_signal() -> Result<(), Box<dyn Error>> {

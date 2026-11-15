@@ -28,9 +28,12 @@ pub(crate) fn write_all(descriptor: RawFd, bytes: &[u8]) -> Result<(), libc::c_i
 ///
 /// `MSG_NOSIGNAL` suppresses the signal for this one call, so no signal mask
 /// or disposition is read or changed and no other thread is affected. A peer
-/// that is gone yields `EPIPE`. If the descriptor is not a socket, or a
-/// sandbox refuses `send` before any byte was accepted, the bytes are written
-/// with plain `write`, exactly as before this function existed.
+/// that is gone yields `EPIPE`. If `send` fails for any other reason before a
+/// byte was accepted, because the descriptor is a pipe or a sandbox refused
+/// the call with whatever errno, the bytes are written with plain `write`,
+/// exactly as before this function existed: that write reports the real
+/// error, and raises `SIGPIPE` if the reader is gone. Once a byte was sent,
+/// nothing is written again.
 pub(crate) fn send_all_nosignal(descriptor: RawFd, bytes: &[u8]) -> Result<(), libc::c_int> {
     let mut sent = 0;
     while sent < bytes.len() {
@@ -63,13 +66,11 @@ pub(crate) fn send_all_nosignal(descriptor: RawFd, bytes: &[u8]) -> Result<(), l
     Ok(())
 }
 
-/// Whether a failed `send` means the call itself cannot be used here: the
-/// descriptor is a pipe, or a sandbox denied the system call with an errno.
+/// Whether a failed first `send` says nothing about the peer, so `write`
+/// must decide. Only the errors that mean the peer is gone are final; a
+/// sandbox may refuse the call with any other errno.
 const fn send_is_unavailable(errno: libc::c_int) -> bool {
-    matches!(
-        errno,
-        libc::ENOTSOCK | libc::ENOSYS | libc::EPERM | libc::EACCES
-    )
+    !matches!(errno, libc::EPIPE | libc::ECONNRESET | libc::ENOTCONN)
 }
 
 #[cfg(any(target_os = "linux", target_os = "dragonfly"))]
@@ -110,4 +111,28 @@ pub(crate) fn last_errno() -> libc::c_int {
     std::io::Error::last_os_error()
         .raw_os_error()
         .unwrap_or(libc::EIO)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::send_is_unavailable;
+
+    /// A refused `send` falls back to `write` whatever errno the sandbox
+    /// chose; only a peer that is gone is a final answer.
+    #[test]
+    fn only_peer_loss_is_final_for_a_first_send() {
+        for errno in [
+            libc::ENOTSOCK,
+            libc::ENOSYS,
+            libc::EPERM,
+            libc::EACCES,
+            libc::EINVAL,
+            libc::EIO,
+        ] {
+            assert!(send_is_unavailable(errno));
+        }
+        for errno in [libc::EPIPE, libc::ECONNRESET, libc::ENOTCONN] {
+            assert!(!send_is_unavailable(errno));
+        }
+    }
 }

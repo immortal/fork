@@ -165,3 +165,20 @@ fn group_errno_treats_eperm_as_a_reserved_group() {
         assert_eq!(classify_group_errno(failed), GroupErrno::Failed);
     }
 }
+
+/// Only `ECHILD` proves the helper's PID is no longer this owner's child;
+/// every other failed wait consumed nothing and must leave cleanup retryable.
+#[test]
+fn only_echild_marks_the_helper_gone() {
+    use super::{HelperWaitFailure, wait_failure};
+    assert!(matches!(
+        wait_failure(std::io::Error::from_raw_os_error(libc::ECHILD)),
+        HelperWaitFailure::Reaped(_)
+    ));
+    for errno in [libc::EPERM, libc::EINVAL, libc::ENOSYS, libc::EINTR] {
+        assert!(matches!(
+            wait_failure(std::io::Error::from_raw_os_error(errno)),
+            HelperWaitFailure::Unobserved(_)
+        ));
+    }
+}

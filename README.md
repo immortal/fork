@@ -329,12 +329,13 @@ the anchor, and waits for helper cleanup under the deadline described below.
   every catchable signal except `SIGCHLD` (default to retain the zombie),
   `SIGCONT` (default for cleanup) and the fault signals (`SIGABRT`, `SIGBUS`,
   `SIGFPE`, `SIGILL`, `SIGSEGV`, `SIGSYS`, `SIGTRAP` and, where it exists,
-  `SIGEMT`), which keep their default action so a broken helper still dies.
+  `SIGEMT`), which keep their default action so a broken helper still dies,
+  unless the owner ignored one, which then stays ignored.
   The helper shares the owner's process group, so this is what keeps a signal
   sent to that group, such as a terminal interrupt, from ending the helper
-  while the owner handles it and lives on. Removing a handler and setting
-  `SIGCHLD` and `SIGCONT` are required and fail guard creation with the errno
-  when refused; ignoring a handler-free signal is hardening, and a sandbox
+  while the owner handles it and lives on. Removing a handler, reading a
+  standard signal's disposition, and setting `SIGCHLD` and `SIGCONT` are
+  required and fail guard creation with the errno when refused; ignoring a handler-free signal is hardening, and a sandbox
   that refuses that setter leaves the helper exposed to that one signal.
   The helper, a post-fork child limited to async-signal-safe calls, then never
   calls `fork(3)`, which would run the application's `pthread_atfork` handlers

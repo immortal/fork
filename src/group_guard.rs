@@ -364,26 +364,61 @@ impl GuardHelper {
                 self.retired = true;
                 Ok(())
             }
-            Err(HelperWaitFailure::StillLive(error)) => {
-                self.terminate_and_reap()?;
-                self.retired = true;
-                Err(error)
-            }
-            Err(HelperWaitFailure::Reaped(error)) => {
-                self.retired = true;
-                Err(error)
-            }
-            // Nothing was consumed, so the helper may still be an unreaped
-            // child: leave it unretired and let the drop try again.
-            Err(HelperWaitFailure::Unobserved(error)) => Err(error),
+            Err(HelperWaitFailure::StillLive(error)) => match self.terminate_and_reap() {
+                Ok(()) => {
+                    self.retired = true;
+                    Err(error)
+                }
+                Err(failure) => self.record_failure(failure),
+            },
+            Err(failure) => self.record_failure(failure),
         }
     }
 
-    fn terminate_and_reap(&self) -> io::Result<()> {
-        if crate::child_signal::signal_owned_child(self.process, Signal::KILL)?.is_none() {
-            wait_event(self.process)?;
+    /// Retire the helper exactly when a failed wait shows it gone, and return
+    /// the failure's error. Anything else leaves it unretired: the helper may
+    /// still be an unreaped child, and the drop tries again.
+    fn record_failure(&mut self, failure: HelperWaitFailure) -> io::Result<()> {
+        match failure {
+            HelperWaitFailure::Reaped(error) => {
+                self.retired = true;
+                Err(error)
+            }
+            HelperWaitFailure::StillLive(error) | HelperWaitFailure::Unobserved(error) => {
+                Err(error)
+            }
         }
-        Ok(())
+    }
+
+    /// Kill the helper at the deadline and reap it.
+    ///
+    /// `Ok` means a terminal event was consumed. A stop or continue event is
+    /// not a reap, and `ECHILD` at any step means the PID is no longer this
+    /// owner's child; both are reported so the caller retires only a helper
+    /// that is really gone.
+    fn terminate_and_reap(&self) -> Result<(), HelperWaitFailure> {
+        match crate::child_signal::signal_owned_child(self.process, Signal::KILL) {
+            Ok(Some(_consumed)) => return Ok(()),
+            Ok(None) => {}
+            Err(error) => return Err(wait_failure(error)),
+        }
+        match wait_event(self.process) {
+            Ok(event) if event.is_terminal() => Ok(()),
+            Ok(_) => Err(HelperWaitFailure::Unobserved(io::Error::other(
+                "process-group helper changed state without exiting after SIGKILL",
+            ))),
+            Err(error) => Err(wait_failure(error)),
+        }
+    }
+}
+
+/// Classify a failed wait or ownership check: `ECHILD` proves the PID is no
+/// longer this owner's child; every other error consumed nothing.
+fn wait_failure(error: io::Error) -> HelperWaitFailure {
+    if error.raw_os_error() == Some(libc::ECHILD) {
+        HelperWaitFailure::Reaped(error)
+    } else {
+        HelperWaitFailure::Unobserved(error)
     }
 }
 
@@ -531,20 +566,21 @@ fn wait_for_clean_exit(process: ProcessId, timeout: Duration) -> Result<(), Help
                     // A running helper can finish via the socket even when a
                     // resume is unavailable. Keep waiting as before; every later
                     // delivery (including deadline KILL) rechecks its own pin.
-                    if let Ok(Some(event)) =
-                        crate::child_signal::signal_owned_child(process, Signal::CONT)
-                    {
-                        return helper_exit_result(event);
+                    match crate::child_signal::signal_owned_child(process, Signal::CONT) {
+                        Ok(Some(event)) => return helper_exit_result(event),
+                        // The ownership check found no such child: stop here
+                        // rather than wait on the PID again.
+                        Err(error) if error.raw_os_error() == Some(libc::ECHILD) => {
+                            return Err(HelperWaitFailure::Reaped(error));
+                        }
+                        Ok(None) | Err(_) => {}
                     }
                 }
             }
             Ok(Some(event)) => {
                 return helper_exit_result(event);
             }
-            Err(error) if error.raw_os_error() == Some(libc::ECHILD) => {
-                return Err(HelperWaitFailure::Reaped(error));
-            }
-            Err(error) => return Err(HelperWaitFailure::Unobserved(error)),
+            Err(error) => return Err(wait_failure(error)),
         }
         initial = false;
         let now = Instant::now();
@@ -655,9 +691,11 @@ fn classify_group_errno(errno: Option<libc::c_int>) -> GroupErrno {
 /// Signals the helper leaves at their default action.
 ///
 /// SIGCHLD keeps the exited anchor a waitable zombie, which is the pin, and
-/// SIGCONT lets cleanup resume a stopped helper. The rest report a fault in
-/// the helper itself or a system call a sandbox refused; ignoring those would
-/// turn a broken helper into one that keeps running.
+/// SIGCONT lets cleanup resume a stopped helper; both are always set. The
+/// rest report a fault in the helper itself or a system call a sandbox
+/// refused; ignoring those would turn a broken helper into one that keeps
+/// running, so an inherited handler is replaced by the default action. One
+/// the owner ignored stays ignored, as it did in 0.11.0.
 const DEFAULT_SIGNALS: &[libc::c_int] = &[
     libc::SIGCHLD,
     libc::SIGCONT,
@@ -694,12 +732,14 @@ const DEFAULT_SIGNALS: &[libc::c_int] = &[
 ///
 /// This runs before anything else in the helper, so cleanup's SIGCONT can
 /// never reach an inherited handler in a helper that stalled later. Each
-/// disposition is read first. Setting SIGCHLD and SIGCONT and removing an
-/// inherited handler are required: their failure, whatever the errno, returns
-/// it for the owner, such as `EPERM` from a sandbox that denies `sigaction`,
-/// because with a handler possibly left in place the helper must not reserve
-/// a group. Ignoring a signal that had no handler only hardens the helper, so
-/// a refusal there is tolerated and creation succeeds as it did in 0.11.0.
+/// SIGCHLD and SIGCONT are set without reading them; every other disposition
+/// is read first. Setting those two, reading a standard signal, and removing
+/// an inherited handler are required: their failure, whatever the errno,
+/// returns it for the owner, such as `EPERM` from a sandbox that denies
+/// `sigaction`, because with a handler possibly left in place the helper must
+/// not reserve a group. Ignoring a signal that had no handler only hardens
+/// the helper, so a refusal there is tolerated and creation succeeds as it
+/// did in 0.11.0.
 fn child_reset_signals() -> Result<(), libc::c_int> {
     // SAFETY: an all-zero sigaction is a valid value: no flags, and an empty
     // mask after sigemptyset; the handler is set per signal below.
@@ -728,15 +768,27 @@ fn child_reset_signals() -> Result<(), libc::c_int> {
         if signal == libc::SIGKILL || signal == libc::SIGSTOP {
             continue;
         }
-        let Some(inherited) = child_query_disposition(signal)? else {
-            continue;
+        // The pin and cleanup's resume are set whatever was inherited, so
+        // they depend on no query.
+        let pinned = signal == libc::SIGCHLD || signal == libc::SIGCONT;
+        let inherited = if pinned {
+            libc::SIG_DFL
+        } else {
+            match child_query_disposition(signal)? {
+                Some(inherited) => inherited,
+                None => continue,
+            }
         };
-        let wanted = helper_disposition(signal);
+        let handled = inherited != libc::SIG_DFL && inherited != libc::SIG_IGN;
+        // A fault signal the owner ignored stays ignored, as in 0.11.0.
+        let wanted = if DEFAULT_SIGNALS.contains(&signal) && inherited == libc::SIG_IGN {
+            libc::SIG_IGN
+        } else {
+            helper_disposition(signal)
+        };
         // The pin, cleanup's resume, and the removal of every application
         // handler are what the guard's safety rests on.
-        let required = signal == libc::SIGCHLD
-            || signal == libc::SIGCONT
-            || (inherited != libc::SIG_DFL && inherited != libc::SIG_IGN);
+        let required = pinned || handled;
         if !required && inherited == wanted {
             continue;
         }
@@ -766,8 +818,17 @@ fn child_reset_signals() -> Result<(), libc::c_int> {
     Ok(())
 }
 
+/// Signals below this number are the standard ones every supported target
+/// defines, so no errno can mean that one of them does not exist.
+const FIRST_NONSTANDARD_SIGNAL: libc::c_int = 32;
+
 /// Read one inherited disposition; `None` for a number the kernel or the C
-/// library does not support, which is the only meaning of `EINVAL` here.
+/// library does not support.
+///
+/// `EINVAL` means unsupported only from `FIRST_NONSTANDARD_SIGNAL` upward,
+/// where realtime ranges have holes and the C library reserves numbers. For a
+/// standard signal it is a refusal like any other errno: the helper cannot
+/// tell whether a handler is installed, so it must not go on.
 fn child_query_disposition(signal: libc::c_int) -> Result<Option<libc::sighandler_t>, libc::c_int> {
     // SAFETY: sigaction initializes this output on success.
     let mut inherited: libc::sigaction = unsafe { std::mem::zeroed() };
@@ -778,7 +839,7 @@ fn child_query_disposition(signal: libc::c_int) -> Result<Option<libc::sighandle
         }
         match crate::raw::last_errno() {
             libc::EINTR => {}
-            libc::EINVAL => return Ok(None),
+            libc::EINVAL if signal >= FIRST_NONSTANDARD_SIGNAL => return Ok(None),
             errno => return Err(errno),
         }
     }

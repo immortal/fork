@@ -85,6 +85,17 @@ int execve(const char *path, char *const argv[], char *const envp[]) {
 }
 int sigaction(int sig, const struct sigaction *action, struct sigaction *previous) {
     int (*real)(int, const struct sigaction *, struct sigaction *) = dlsym(RTLD_NEXT, "sigaction");
+    if (getpid() != owner && !action && sig == SIGUSR1 && named("query-einval")) {
+        /* A sandbox that refuses to say whether a standard signal has a
+         * handler, with the errno that marks an unsupported number. */
+        errno = EINVAL;
+        return -1;
+    }
+    if (getpid() != owner && !action && (sig == SIGCHLD || sig == SIGCONT) && named("query-pin")) {
+        /* The pin and the resume signal must not depend on any query. */
+        errno = EINVAL;
+        return -1;
+    }
     if (getpid() != owner && action && sig == SIGUSR1 && named("reset-einval")) {
         /* A sandbox that refuses to remove one inherited handler, with the
          * errno that also marks an unsupported signal number. */

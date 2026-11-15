@@ -47,9 +47,10 @@ both caused by system calls the owner now makes and 0.10.0 did not.
   the drop repeated the cleanup against the already reaped PID. If the owner
   had reused that PID for a new child, the child was resumed, then killed and
   reaped after three seconds. Cleanup now runs once after the helper was
-  reaped or is no longer a child. A cleanup that was refused before it could
-  wait, or whose wait failed without consuming anything, is still retried on
-  drop.
+  reaped or is no longer a child (`ECHILD`), at whichever step that shows. A
+  cleanup that was refused before it could wait, whose wait failed without
+  consuming anything, or that saw the helper stop again after `SIGKILL`, is
+  still retried on drop.
 * The guard helper shares the owner's process group and used to restore the
   default action of every signal the owner handled. A signal sent to that
   group, such as a terminal interrupt or `kill -TERM -<pgid>`, then killed the
@@ -57,13 +58,15 @@ both caused by system calls the owner now makes and 0.10.0 did not.
   `BrokenPipe` and the workload outlived the owner uncontained. The helper now
   ignores every signal except `SIGCHLD` and `SIGCONT`, which the pin and
   cleanup's resume need, and the fault signals `SIGABRT`, `SIGBUS`, `SIGFPE`,
-  `SIGILL`, `SIGSEGV`, `SIGSYS`, `SIGTRAP` and, where it exists, `SIGEMT`. It
-  still exits when the owner closes or loses the socket, and `SIGKILL` and
-  `SIGSTOP` stay effective. Setting `SIGCHLD` and `SIGCONT` and removing an
-  inherited handler remain required, as in 0.11.0: a refusal fails guard
-  creation whatever its errno. Ignoring a signal that had no handler is
-  hardening only, so a sandbox that refuses that setter still gets its guard,
-  exposed to that one signal as before.
+  `SIGILL`, `SIGSEGV`, `SIGSYS`, `SIGTRAP` and, where it exists, `SIGEMT`,
+  which keep their default action unless the owner ignored one: that one
+  stays ignored, as in 0.11.0. It still exits when the owner closes or loses
+  the socket, and `SIGKILL` and `SIGSTOP` stay effective. `SIGCHLD` and
+  `SIGCONT` are set without reading them, and setting them, reading a
+  standard signal's disposition, and removing an inherited handler are
+  required: a refusal fails guard creation whatever its errno. Ignoring a
+  signal that had no handler is hardening only, so a sandbox that refuses
+  that setter still gets its guard, exposed to that one signal as before.
 * `DaemonNotifier::notify_ready` and `fail_and_exit` wrote to the startup pipe
   with `SIGPIPE` at its default action under the default
   `ChildSignalState::Reset`, so a daemon whose invoker was gone was killed
@@ -99,15 +102,22 @@ both caused by system calls the owner now makes and 0.10.0 did not.
   that stopped a helper that way must drop or disarm the guard instead.
 * `checked_daemon` now creates its startup channel with `socketpair`, and
   `notify_ready` and `fail_and_exit` send on it with `sendto`. A sandbox that
-  refuses `socketpair` with an errno gets the pipe of 0.11.0, and one that
-  refuses the send gets a plain `write`; in both a lost invoker raises
-  `SIGPIPE` as before. A sandbox that kills on `socketpair` or `sendto` must
-  permit them.
+  refuses `socketpair` with an errno gets the pipe of 0.11.0. A first send
+  that fails with any errno other than `EPIPE`, `ECONNRESET` or `ENOTCONN`
+  is repeated as a plain `write`. On both fallbacks a lost invoker raises
+  `SIGPIPE` as before. No errno fallback can observe a killing filter: a
+  sandbox that kills on `socketpair` or `sendto` terminates the invoker or
+  the daemon where 0.11.0 succeeded, and must permit them. This is a
+  deliberate exception to the no-new-system-call rule, accepted for the
+  `EPIPE` contract above.
 * The helper now reads each signal's disposition and sets `SIG_IGN` for
   signals that were at their default, where 0.11.0 set only handled signals,
   `SIGCHLD` and `SIGCONT`. A refused setter for a handler-free signal is
   tolerated, so only a sandbox that kills on such a `sigaction` call is
-  affected.
+  affected; that too is a deliberate exception, accepted so a signal sent to
+  the owner's group cannot end the helper. Reading a standard signal's
+  disposition must now succeed: 0.11.0 skipped a signal whose query answered
+  `EINVAL` and could leave its handler in the helper.
 
 ## 0.11.0
 

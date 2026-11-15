@@ -34,6 +34,8 @@ pub(super) fn run() -> Result<(), Box<dyn Error>> {
             "continue-denied" => unavailable_continue(),
             "policy-denied" => unreadable_policy(),
             "reset-denied" => denied_helper_reset(),
+            "query-einval" => handler_query_refused_with_einval(),
+            "query-pin" => pin_reset_needs_no_query(),
             "reset-einval" => handler_removal_refused_with_einval(),
             "reset-optional" => optional_reset_refused(),
             "wait-denied" => refused_wait_is_retried(),
@@ -119,6 +121,8 @@ fn cases() -> Vec<(&'static str, Option<libc::c_int>)> {
         "continue-denied",
         "policy-denied",
         "reset-denied",
+        "query-einval",
+        "query-pin",
         "reset-einval",
         "reset-optional",
         "wait-denied",
@@ -243,6 +247,37 @@ fn handler_removal_refused_with_einval() -> Result<(), Box<dyn Error>> {
     match ProcessGroupGuard::new() {
         Err(error) if error.raw_os_error() == Some(libc::EINVAL) => Ok(()),
         other => Err(format!("a handler left in the helper was accepted: {other:?}").into()),
+    }
+}
+
+/// A standard signal whose disposition cannot be read may carry a handler, so
+/// the helper must not go on, even when the refusal is `EINVAL`.
+fn handler_query_refused_with_einval() -> Result<(), Box<dyn Error>> {
+    let _handler = install(libc::SIGUSR1, inherited_handler as *const () as usize, 0)?;
+    match ProcessGroupGuard::new() {
+        Err(error) if error.raw_os_error() == Some(libc::EINVAL) => Ok(()),
+        other => Err(format!("an unreadable standard signal was skipped: {other:?}").into()),
+    }
+}
+
+/// SIGCHLD and SIGCONT are set whatever was inherited, so a refused query of
+/// either must neither fail the guard nor skip the reset: under an owner that
+/// ignores SIGCHLD the helper must still keep its exited anchor, the pin.
+fn pin_reset_needs_no_query() -> Result<(), Box<dyn Error>> {
+    let auto_reaping = install(libc::SIGCHLD, libc::SIG_IGN, 0)?;
+    let guard = ProcessGroupGuard::new()?;
+    let helper = guard.guard_process();
+    // An unpinned anchor is reaped as soon as it exits; give that time.
+    thread::sleep(CLEANUP);
+    let pinned = fork::process_group_exists(guard.process_group())?;
+    drop(auto_reaping);
+    guard.disarm(BOUND)?;
+    if !pinned {
+        return Err("the helper lost its anchor under an auto-reaping owner".into());
+    }
+    match fork::wait_event_nohang(helper) {
+        Err(error) if error.raw_os_error() == Some(libc::ECHILD) => Ok(()),
+        other => Err(format!("disarm left the helper behind: {other:?}").into()),
     }
 }
 
