@@ -277,6 +277,7 @@ mod group_guard;
 mod identity;
 mod raw;
 mod signal;
+mod sigpipe;
 mod subreaper;
 mod wait;
 

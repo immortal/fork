@@ -238,9 +238,11 @@ impl DaemonNotifier {
     /// # Errors
     ///
     /// Returns the startup-pipe write error, normally `EPIPE` when the invoker
-    /// has already timed out or exited.
+    /// has already timed out or exited. `SIGPIPE` is blocked in the calling
+    /// thread for the write, so the default [`ChildSignalState::Reset`], which
+    /// restores its terminating action, cannot kill the daemon here instead.
     pub fn notify_ready(self) -> io::Result<()> {
-        write_record(
+        write_record_without_sigpipe(
             self.descriptor.as_raw_fd(),
             WireRecord::new(RECORD_READY, DaemonStage::Initialization, 0),
         )
@@ -250,10 +252,11 @@ impl DaemonNotifier {
     /// Report initialization failure and terminate the detached daemon.
     ///
     /// The explicit name reflects that this method never returns and uses
-    /// `_exit` so inherited application destructors are not run.
+    /// `_exit` so inherited application destructors are not run. A lost
+    /// invoker does not turn the exit into a `SIGPIPE` death.
     pub fn fail_and_exit(self, error: &io::Error) -> ! {
         let errno = error.raw_os_error().unwrap_or(libc::EIO);
-        let _ = write_record(
+        let _ = write_record_without_sigpipe(
             self.descriptor.as_raw_fd(),
             WireRecord::new(RECORD_FAILURE, DaemonStage::Initialization, errno),
         );
@@ -567,6 +570,11 @@ fn write_record(descriptor: RawFd, record: WireRecord) -> Result<(), libc::c_int
         std::slice::from_raw_parts((&raw const record).cast::<u8>(), size_of::<WireRecord>())
     };
     write_all(descriptor, bytes)
+}
+
+/// Write a notifier record so a lost invoker yields `EPIPE`, never `SIGPIPE`.
+fn write_record_without_sigpipe(descriptor: RawFd, record: WireRecord) -> Result<(), libc::c_int> {
+    crate::sigpipe::without_sigpipe(|| write_record(descriptor, record))
 }
 
 fn parent_wait_ready(
@@ -899,6 +907,44 @@ mod tests {
         assert_eq!(daemon_stage_from_wire(6), Some(DaemonStage::Initialization));
         assert_eq!(daemon_stage_from_wire(8), Some(DaemonStage::SignalState));
         assert_eq!(daemon_stage_from_wire(1), None);
+    }
+
+    /// With SIGPIPE at its default action, as `ChildSignalState::Reset`
+    /// leaves it, a notifier whose invoker is gone must get `EPIPE` back and
+    /// keep its signal mask and pending set unchanged.
+    #[test]
+    fn notifier_reports_a_lost_invoker_without_sigpipe() -> std::io::Result<()> {
+        use std::os::fd::AsRawFd;
+        let (reader, writer) = crate::pipe_cloexec()?.into_parts();
+        // No reader may remain anywhere, or the child's write would succeed.
+        drop(reader);
+        let process = match crate::fork_process()? {
+            crate::ProcessFork::Parent(process) => process,
+            crate::ProcessFork::Child => {
+                // SAFETY: restores the default action in this test child only.
+                unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
+                let record = WireRecord::new(super::RECORD_READY, DaemonStage::Initialization, 0);
+                let result = super::write_record_without_sigpipe(writer.as_raw_fd(), record);
+                let code = match (result, crate::sigpipe::is_pending()) {
+                    (Err(libc::EPIPE), Some(false)) => 0,
+                    (Err(libc::EPIPE), _) => 3,
+                    _ => 4,
+                };
+                // SAFETY: the test child must not run the harness's destructors.
+                unsafe { libc::_exit(code) }
+            }
+        };
+        drop(writer);
+        let event = crate::wait_event(process)?;
+        assert_eq!(
+            event,
+            crate::ChildEvent::Exited {
+                pid: process,
+                code: 0
+            },
+            "the notifier did not report EPIPE cleanly"
+        );
+        Ok(())
     }
 
     /// Error cleanup must retain the intermediate's PID/group reservation.
