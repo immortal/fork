@@ -255,6 +255,7 @@ impl GuardHelper {
         set_nonblocking(&writer)?;
         let descriptors = GuardPrepared::new(&reader)?;
         let anchor = PreparedAnchor::prepare()?;
+        let known_signals = KnownSignals::prepare();
         match fork_process()? {
             ProcessFork::Parent(process) => {
                 drop(reader);
@@ -267,7 +268,7 @@ impl GuardHelper {
             }
             ProcessFork::Child => {
                 let descriptor = reader.as_raw_fd();
-                match child_reset_signals()
+                match child_reset_signals(known_signals)
                     .and_then(|()| descriptors.apply_in_child())
                     .and_then(|()| child_spawn_anchor(&anchor))
                 {
@@ -733,14 +734,15 @@ const DEFAULT_SIGNALS: &[libc::c_int] = &[
 /// This runs before anything else in the helper, so cleanup's SIGCONT can
 /// never reach an inherited handler in a helper that stalled later. Each
 /// SIGCHLD and SIGCONT are set without reading them; every other disposition
-/// is read first. Setting those two, reading a standard signal, and removing
+/// is read first. Setting those two, reading a signal `known` says must
+/// exist (the standard signals and the target's realtime range), and removing
 /// an inherited handler are required: their failure, whatever the errno,
 /// returns it for the owner, such as `EPERM` from a sandbox that denies
 /// `sigaction`, because with a handler possibly left in place the helper must
 /// not reserve a group. Ignoring a signal that had no handler only hardens
 /// the helper, so a refusal there is tolerated and creation succeeds as it
 /// did in 0.11.0.
-fn child_reset_signals() -> Result<(), libc::c_int> {
+fn child_reset_signals(known: KnownSignals) -> Result<(), libc::c_int> {
     // SAFETY: an all-zero sigaction is a valid value: no flags, and an empty
     // mask after sigemptyset; the handler is set per signal below.
     let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
@@ -774,7 +776,7 @@ fn child_reset_signals() -> Result<(), libc::c_int> {
         let inherited = if pinned {
             libc::SIG_DFL
         } else {
-            match child_query_disposition(signal)? {
+            match child_query_disposition(signal, known)? {
                 Some(inherited) => inherited,
                 None => continue,
             }
@@ -822,14 +824,64 @@ fn child_reset_signals() -> Result<(), libc::c_int> {
 /// defines, so no errno can mean that one of them does not exist.
 const FIRST_NONSTANDARD_SIGNAL: libc::c_int = 32;
 
+/// The signal numbers above the standard ones that this target is known to
+/// support, read from the C library by the owner before the helper fork.
+///
+/// An application can install a handler on any of them, so for these, as for
+/// the standard signals, `EINVAL` from a query is a refusal and never proof
+/// that the signal does not exist. Outside the range a number may be a hole
+/// or reserved by the C library, which is what `EINVAL` reports there.
+#[derive(Clone, Copy, Debug)]
+struct KnownSignals {
+    first: libc::c_int,
+    last: libc::c_int,
+}
+
+impl KnownSignals {
+    /// Linux: the realtime range the C library exposes, which starts after
+    /// the numbers it reserves for itself.
+    #[cfg(target_os = "linux")]
+    fn prepare() -> Self {
+        Self {
+            first: libc::SIGRTMIN(),
+            last: libc::SIGRTMAX(),
+        }
+    }
+
+    /// FreeBSD: every number up to the kernel's maximum is a valid signal,
+    /// except 32, which libthr reserves for cancellation.
+    #[cfg(target_os = "freebsd")]
+    const fn prepare() -> Self {
+        Self {
+            first: FIRST_NONSTANDARD_SIGNAL + 1,
+            last: 128,
+        }
+    }
+
+    /// Elsewhere no signal above the standard ones is known to be supported;
+    /// macOS has none at all.
+    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+    const fn prepare() -> Self {
+        Self { first: 1, last: 0 }
+    }
+
+    /// Whether `EINVAL` for `signal` can only be a refusal.
+    const fn must_exist(self, signal: libc::c_int) -> bool {
+        signal < FIRST_NONSTANDARD_SIGNAL || (signal >= self.first && signal <= self.last)
+    }
+}
+
 /// Read one inherited disposition; `None` for a number the kernel or the C
 /// library does not support.
 ///
-/// `EINVAL` means unsupported only from `FIRST_NONSTANDARD_SIGNAL` upward,
-/// where realtime ranges have holes and the C library reserves numbers. For a
-/// standard signal it is a refusal like any other errno: the helper cannot
-/// tell whether a handler is installed, so it must not go on.
-fn child_query_disposition(signal: libc::c_int) -> Result<Option<libc::sighandler_t>, libc::c_int> {
+/// `EINVAL` means unsupported only for a number outside the standard signals
+/// and the target's known range. For a signal that must exist it is a refusal
+/// like any other errno: the helper cannot tell whether a handler is
+/// installed, so it must not go on.
+fn child_query_disposition(
+    signal: libc::c_int,
+    known: KnownSignals,
+) -> Result<Option<libc::sighandler_t>, libc::c_int> {
     // SAFETY: sigaction initializes this output on success.
     let mut inherited: libc::sigaction = unsafe { std::mem::zeroed() };
     loop {
@@ -839,7 +891,7 @@ fn child_query_disposition(signal: libc::c_int) -> Result<Option<libc::sighandle
         }
         match crate::raw::last_errno() {
             libc::EINTR => {}
-            libc::EINVAL if signal >= FIRST_NONSTANDARD_SIGNAL => return Ok(None),
+            libc::EINVAL if !known.must_exist(signal) => return Ok(None),
             errno => return Err(errno),
         }
     }

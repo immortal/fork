@@ -36,6 +36,7 @@ pub(super) fn run() -> Result<(), Box<dyn Error>> {
             "reset-denied" => denied_helper_reset(),
             "query-einval" => handler_query_refused_with_einval(),
             "query-pin" => pin_reset_needs_no_query(),
+            "query-realtime" => realtime_query_refused_with_einval(),
             "reset-einval" => handler_removal_refused_with_einval(),
             "reset-optional" => optional_reset_refused(),
             "wait-denied" => refused_wait_is_retried(),
@@ -123,6 +124,7 @@ fn cases() -> Vec<(&'static str, Option<libc::c_int>)> {
         "reset-denied",
         "query-einval",
         "query-pin",
+        "query-realtime",
         "reset-einval",
         "reset-optional",
         "wait-denied",
@@ -257,6 +259,16 @@ fn handler_query_refused_with_einval() -> Result<(), Box<dyn Error>> {
     match ProcessGroupGuard::new() {
         Err(error) if error.raw_os_error() == Some(libc::EINVAL) => Ok(()),
         other => Err(format!("an unreadable standard signal was skipped: {other:?}").into()),
+    }
+}
+
+/// A realtime signal is as real as a standard one: an unreadable disposition
+/// may hide a handler there too, so `EINVAL` must not pass for "no such signal".
+fn realtime_query_refused_with_einval() -> Result<(), Box<dyn Error>> {
+    let _handler = install(libc::SIGRTMIN(), inherited_handler as *const () as usize, 0)?;
+    match ProcessGroupGuard::new() {
+        Err(error) if error.raw_os_error() == Some(libc::EINVAL) => Ok(()),
+        other => Err(format!("an unreadable realtime signal was skipped: {other:?}").into()),
     }
 }
 

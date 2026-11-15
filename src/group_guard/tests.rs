@@ -182,3 +182,30 @@ fn only_echild_marks_the_helper_gone() {
         ));
     }
 }
+
+/// `EINVAL` may mean "no such signal" only where that is possible: never for
+/// a standard signal, and never inside the target's known realtime range.
+#[test]
+fn known_signals_cover_the_standard_and_realtime_ranges() {
+    use super::KnownSignals;
+    let known = KnownSignals::prepare();
+    for signal in [libc::SIGHUP, libc::SIGUSR1, libc::SIGTERM, 31] {
+        assert!(known.must_exist(signal));
+    }
+    #[cfg(target_os = "linux")]
+    {
+        assert!(known.must_exist(libc::SIGRTMIN()));
+        assert!(known.must_exist(libc::SIGRTMAX()));
+        // The C library reserves the first realtime numbers for itself.
+        assert!(!known.must_exist(32));
+        assert!(!known.must_exist(libc::SIGRTMAX() + 1));
+    }
+    #[cfg(target_os = "freebsd")]
+    {
+        assert!(known.must_exist(libc::SIGRTMIN));
+        assert!(known.must_exist(libc::SIGRTMAX));
+        assert!(!known.must_exist(32));
+    }
+    #[cfg(target_vendor = "apple")]
+    assert!(!known.must_exist(32));
+}

@@ -62,9 +62,9 @@ both caused by system calls the owner now makes and 0.10.0 did not.
   which keep their default action unless the owner ignored one: that one
   stays ignored, as in 0.11.0. It still exits when the owner closes or loses
   the socket, and `SIGKILL` and `SIGSTOP` stay effective. `SIGCHLD` and
-  `SIGCONT` are set without reading them, and setting them, reading a
-  standard signal's disposition, and removing an inherited handler are
-  required: a refusal fails guard creation whatever its errno. Ignoring a
+  `SIGCONT` are set without reading them, and setting them, reading the
+  disposition of a standard signal or of one in the target's realtime range,
+  and removing an inherited handler are required: a refusal fails guard creation whatever its errno. Ignoring a
   signal that had no handler is hardening only, so a sandbox that refuses
   that setter still gets its guard, exposed to that one signal as before.
 * `DaemonNotifier::notify_ready` and `fail_and_exit` wrote to the startup pipe
@@ -103,8 +103,8 @@ both caused by system calls the owner now makes and 0.10.0 did not.
 * `checked_daemon` now creates its startup channel with `socketpair`, and
   `notify_ready` and `fail_and_exit` send on it with `sendto`. A sandbox that
   refuses `socketpair` with an errno gets the pipe of 0.11.0. A first send
-  that fails with any errno other than `EPIPE`, `ECONNRESET` or `ENOTCONN`
-  is repeated as a plain `write`. On both fallbacks a lost invoker raises
+  that fails with any errno other than `EPIPE`, `ECONNRESET` or `ENOTCONN`,
+  or that is interrupted nine times in a row, is repeated as a plain `write`. On both fallbacks a lost invoker raises
   `SIGPIPE` as before. No errno fallback can observe a killing filter: a
   sandbox that kills on `socketpair` or `sendto` terminates the invoker or
   the daemon where 0.11.0 succeeded, and must permit them. This is a
@@ -115,9 +115,10 @@ both caused by system calls the owner now makes and 0.10.0 did not.
   `SIGCHLD` and `SIGCONT`. A refused setter for a handler-free signal is
   tolerated, so only a sandbox that kills on such a `sigaction` call is
   affected; that too is a deliberate exception, accepted so a signal sent to
-  the owner's group cannot end the helper. Reading a standard signal's
-  disposition must now succeed: 0.11.0 skipped a signal whose query answered
-  `EINVAL` and could leave its handler in the helper.
+  the owner's group cannot end the helper. Reading the disposition of a
+  standard signal, or of one in the realtime range of Linux and FreeBSD, must
+  now succeed: 0.11.0 skipped a signal whose query answered `EINVAL` and
+  could leave its handler in the helper.
 
 ## 0.11.0
 

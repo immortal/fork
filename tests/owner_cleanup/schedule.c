@@ -91,6 +91,12 @@ int sigaction(int sig, const struct sigaction *action, struct sigaction *previou
         errno = EINVAL;
         return -1;
     }
+    if (getpid() != owner && !action && sig == SIGRTMIN && named("query-realtime")) {
+        /* The same refusal for a supported realtime signal: its number is
+         * above the standard ones, but the signal exists. */
+        errno = EINVAL;
+        return -1;
+    }
     if (getpid() != owner && !action && (sig == SIGCHLD || sig == SIGCONT) && named("query-pin")) {
         /* The pin and the resume signal must not depend on any query. */
         errno = EINVAL;
