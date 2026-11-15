@@ -24,8 +24,9 @@ extern "C" fn reap_in_helper(_: libc::c_int) {
 
 pub(super) fn run(owner_loss: bool) -> Result<(), Box<dyn std::error::Error>> {
     OWNER.store(i32::try_from(std::process::id())?, Ordering::Relaxed);
-    // USR1 defaults to exit; URG defaults to ignore. Both must remove the
-    // application callback, even when the helper remains alive afterwards.
+    // USR1 defaults to exit; URG defaults to ignore. The helper must remove
+    // the application callback from both and ignore them, so it stays alive
+    // and keeps its pin whatever the signal's default action is.
     for raw in [libc::SIGUSR1, libc::SIGURG] {
         let _action = install(raw, reap_in_helper as *const () as usize, 0)?;
         let _ignored = install(libc::SIGUSR2, libc::SIG_IGN, 0)?;
@@ -35,14 +36,10 @@ pub(super) fn run(owner_loss: bool) -> Result<(), Box<dyn std::error::Error>> {
         wait_zombie(group.get())?;
         fork::signal_process(helper, Signal::USR2)?; // ignored stays ignored
         fork::signal_process(helper, Signal::try_from(raw)?)?;
-        // Observe the original schedule: either the old callback removes the
-        // anchor or default USR1 exits the helper. URG has no ack, so a bounded
-        // scheduling window permits its callback before exercising all paths.
-        if raw == libc::SIGUSR1 {
-            wait_zombie(helper.get())?;
-        } else {
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        }
+        // Neither signal has an acknowledgement, so a bounded scheduling
+        // window permits a surviving callback to remove the anchor, or a
+        // default action to end the helper, before exercising all paths.
+        std::thread::sleep(std::time::Duration::from_millis(100));
         // SAFETY: a query only; owner disposition must be unchanged.
         let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
         if unsafe { libc::sigaction(raw, ptr::null(), &raw mut action) } != 0 {
@@ -52,14 +49,9 @@ pub(super) fn run(owner_loss: bool) -> Result<(), Box<dyn std::error::Error>> {
         if owner_loss {
             drop(guard);
         } else {
-            let delivery = guard.signal_group(Signal::TERM, BOUND);
-            let disarm = guard.disarm(BOUND);
-            if raw == libc::SIGURG {
-                delivery?;
-                disarm?;
-            } else {
-                assert!(delivery.is_err(), "dead helper accepted delivery");
-            }
+            // The helper survived with its anchor, so both must succeed.
+            guard.signal_group(Signal::TERM, BOUND)?;
+            guard.disarm(BOUND)?;
         }
     }
     Ok(())

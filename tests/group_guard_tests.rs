@@ -89,6 +89,10 @@ fn process_group_guard_contains_owner_loss_and_disarms_cleanly() -> Result<(), B
     )?;
     require_case("helper-mediated signals", helper_signals_live_workload())?;
     require_case(
+        "catchable signals do not end the helper",
+        catchable_signals_do_not_end_the_helper(),
+    )?;
+    require_case(
         "dead helper rejects signals",
         dead_helper_rejects_group_signal(),
     )?;
@@ -315,6 +319,37 @@ fn helper_signals_live_workload() -> Result<(), Box<dyn Error>> {
 }
 
 /// Even before the guard observes helper loss, no direct group kill is sent.
+/// The helper shares the owner's process group, so a terminal interrupt or a
+/// service manager's group signal reaches it too. An owner that handles the
+/// signal lives on and must keep its guard: the helper ignores the signal,
+/// still delivers group signals, and still disarms cleanly.
+fn catchable_signals_do_not_end_the_helper() -> Result<(), Box<dyn Error>> {
+    let mut guard = ProcessGroupGuard::new()?;
+    let mut workload = WorkloadGuard::new(spawn_workload(guard.process_group())?);
+    guard.activate(CLEANUP_TIMEOUT)?;
+    let helper = guard.guard_process();
+    for signal in [
+        Signal::HUP,
+        Signal::INT,
+        Signal::QUIT,
+        Signal::TERM,
+        Signal::USR1,
+        Signal::USR2,
+        Signal::ALRM,
+    ] {
+        signal_process(helper, signal)?;
+    }
+    // A completed exchange proves the helper outlived every pending signal.
+    guard.signal_group(Signal::CONT, CLEANUP_TIMEOUT)?;
+    require_helper_running(helper)?;
+    if wait_event_nohang(workload.process())?.is_some_and(ChildEvent::is_terminal) {
+        return Err(io::Error::other("signalling the helper ended the workload").into());
+    }
+    guard.disarm(CLEANUP_TIMEOUT)?;
+    require_not_a_child(helper)?;
+    terminate_workload(&mut workload)
+}
+
 fn dead_helper_rejects_group_signal() -> Result<(), Box<dyn Error>> {
     let guard = ProcessGroupGuard::new()?;
     let mut workload = WorkloadGuard::new(spawn_workload(guard.process_group())?);

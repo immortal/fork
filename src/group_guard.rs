@@ -3,9 +3,11 @@
 //! An out-of-group helper owns the guard's lifetime. It creates a short-lived
 //! anchor which leads the reserved group and exits at once, and it does not
 //! reap that anchor while the guard is armed. The anchor is created without
-//! running application fork callbacks (see `anchor`), and the helper resets
-//! its signal dispositions first, so no foreign code runs in the helper and
-//! nothing but the helper can reap the anchor. The unreaped zombie remains a
+//! running application fork callbacks (see `anchor`), and the helper first
+//! removes every inherited signal handler, so no foreign code runs in the
+//! helper and nothing but the helper can reap the anchor. It also ignores
+//! every signal it does not need, so a signal sent to the owner's process
+//! group, which the helper shares, cannot end it while the owner lives on. The unreaped zombie remains a
 //! member of the group, so the group exists and its numeric ID cannot be
 //! reused while the helper holds the anchor, even after every workload member
 //! has exited or left the group. An externally killed helper can lose this pin
@@ -630,19 +632,41 @@ fn classify_group_errno(errno: Option<libc::c_int>) -> GroupErrno {
     }
 }
 
-/// Give the helper exec-like dispositions before it has any children.
+/// Signals the helper leaves at their default action.
 ///
-/// Any application handler, not just SIGCHLD, could reap the anchor. Reset all
-/// handlers, retaining ignored signals except SIGCHLD (the zombie pin) and
-/// SIGCONT (cleanup's resume). Block callbacks while changing dispositions,
-/// then restore the inherited mask. The anchor inherits this sanitized state;
-/// it only calls setpgid and _exit, so it needs no second reset. The owner is
-/// untouched. All operations here are async-signal-safe.
+/// SIGCHLD keeps the exited anchor a waitable zombie, which is the pin, and
+/// SIGCONT lets cleanup resume a stopped helper. The rest report a fault in
+/// the helper itself or a system call a sandbox refused; ignoring those would
+/// turn a broken helper into one that keeps running.
+const DEFAULT_SIGNALS: &[libc::c_int] = &[
+    libc::SIGCHLD,
+    libc::SIGCONT,
+    libc::SIGABRT,
+    libc::SIGBUS,
+    libc::SIGFPE,
+    libc::SIGILL,
+    libc::SIGSEGV,
+    libc::SIGSYS,
+    libc::SIGTRAP,
+];
+
+/// Remove every application handler from the helper before it has children.
+///
+/// Any inherited handler, not just SIGCHLD's, could reap the anchor, so none
+/// may remain. The helper shares the owner's process group, and a signal sent
+/// to that group (a terminal interrupt, a service manager's group kill) must
+/// not end it while the owner handles the signal and lives on: that would
+/// release the pin and the fail-closed cleanup together. Every signal is
+/// therefore ignored except [`DEFAULT_SIGNALS`]. The helper still exits when
+/// the owner closes or loses the socket, and SIGKILL and SIGSTOP stay
+/// effective. Block callbacks while changing dispositions, then restore the
+/// inherited mask. A forked anchor inherits this state; it only calls setpgid
+/// and _exit, so it needs no reset of its own. The owner is untouched. All
+/// operations here are async-signal-safe.
 fn child_reset_signals() {
-    // SAFETY: an all-zero sigaction is a valid value: no flags, an empty mask
-    // after sigemptyset, and the default handler set below.
+    // SAFETY: an all-zero sigaction is a valid value: no flags, and an empty
+    // mask after sigemptyset; the handler is set per signal below.
     let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
-    action.sa_sigaction = libc::SIG_DFL;
     // SAFETY: sigemptyset initializes writable mask storage in this child.
     if unsafe { libc::sigemptyset(&raw mut action.sa_mask) } != 0 {
         child_exit(FAILURE_EXIT);
@@ -658,7 +682,7 @@ fn child_reset_signals() {
         child_exit(FAILURE_EXIT);
     }
     // A signal set has at least one bit per supported signal on our Unix
-    // targets. Query the entire representable range, including realtime and
+    // targets. Cover the entire representable range, including realtime and
     // platform-specific signals; EINVAL skips holes and libc-reserved signals.
     for signal in 1..=size_of::<libc::sigset_t>() * 8 {
         let Ok(signal) = libc::c_int::try_from(signal) else {
@@ -667,11 +691,10 @@ fn child_reset_signals() {
         if signal == libc::SIGKILL || signal == libc::SIGSTOP {
             continue;
         }
-        // SAFETY: sigaction initializes this output on success.
-        let mut inherited: libc::sigaction = unsafe { std::mem::zeroed() };
+        action.sa_sigaction = helper_disposition(signal);
         loop {
-            // SAFETY: reads one disposition into live storage.
-            if unsafe { libc::sigaction(signal, std::ptr::null(), &raw mut inherited) } == 0 {
+            // SAFETY: initialized action; changes only this helper's disposition.
+            if unsafe { libc::sigaction(signal, &raw const action, std::ptr::null_mut()) } == 0 {
                 break;
             }
             match crate::raw::last_errno() {
@@ -680,27 +703,22 @@ fn child_reset_signals() {
                 _ => child_exit(FAILURE_EXIT),
             }
         }
-        if signal != libc::SIGCHLD
-            && signal != libc::SIGCONT
-            && (inherited.sa_sigaction == libc::SIG_DFL || inherited.sa_sigaction == libc::SIG_IGN)
-        {
-            continue;
-        }
-        loop {
-            // SAFETY: initialized action; changes only this helper's disposition.
-            if unsafe { libc::sigaction(signal, &raw const action, std::ptr::null_mut()) } == 0 {
-                break;
-            }
-            if crate::raw::last_errno() != libc::EINTR {
-                child_exit(FAILURE_EXIT);
-            }
-        }
     }
     // SAFETY: restore the mask saved above, now with no application callbacks.
     if unsafe { libc::sigprocmask(libc::SIG_SETMASK, &raw const previous, std::ptr::null_mut()) }
         != 0
     {
         child_exit(FAILURE_EXIT);
+    }
+}
+
+/// The disposition the helper gives `signal`: default for
+/// [`DEFAULT_SIGNALS`], ignored for every other signal.
+fn helper_disposition(signal: libc::c_int) -> libc::sighandler_t {
+    if DEFAULT_SIGNALS.contains(&signal) {
+        libc::SIG_DFL
+    } else {
+        libc::SIG_IGN
     }
 }
 
@@ -932,6 +950,35 @@ mod tests {
         let decoded = decode_group_record(libc::pid_t::from_ne_bytes(record));
         assert!(matches!(decoded, Err(error) if error.raw_os_error() == Some(libc::ENOENT)));
         Ok(())
+    }
+
+    /// The pin and cleanup's resume need default SIGCHLD and SIGCONT, and a
+    /// faulting helper must still die; every other signal is ignored so a
+    /// signal to the owner's group cannot end the helper.
+    #[test]
+    fn helper_ignores_everything_but_its_pin_resume_and_faults() {
+        use super::helper_disposition;
+        for signal in [
+            libc::SIGCHLD,
+            libc::SIGCONT,
+            libc::SIGSEGV,
+            libc::SIGBUS,
+            libc::SIGSYS,
+        ] {
+            assert_eq!(helper_disposition(signal), libc::SIG_DFL);
+        }
+        for signal in [
+            libc::SIGHUP,
+            libc::SIGINT,
+            libc::SIGQUIT,
+            libc::SIGTERM,
+            libc::SIGPIPE,
+            libc::SIGUSR1,
+            libc::SIGUSR2,
+            libc::SIGTSTP,
+        ] {
+            assert_eq!(helper_disposition(signal), libc::SIG_IGN);
+        }
     }
 
     /// `EPERM` keeps the anchor's group reserved, because macOS answers it for
