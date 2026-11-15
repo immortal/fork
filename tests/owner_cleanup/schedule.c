@@ -78,6 +78,16 @@ int execve(const char *path, char *const argv[], char *const envp[]) {
 }
 int sigaction(int sig, const struct sigaction *action, struct sigaction *previous) {
     int (*real)(int, const struct sigaction *, struct sigaction *) = dlsym(RTLD_NEXT, "sigaction");
+    if (getpid() != owner && action && named("reset-denied")) {
+        /* A sandbox that denies the helper's own signal reset with an errno. */
+        errno = EPERM;
+        return -1;
+    }
+    if (getpid() == owner && sig == SIGCHLD && !action && named("policy-denied")) {
+        /* A sandbox that denies the owner's policy query with an errno. */
+        errno = EPERM;
+        return -1;
+    }
     int result = real(sig, action, previous);
     if (result == 0 && getpid() == owner && sig == SIGCHLD && !action
         && named("guard-deadline") && held && !stolen) {

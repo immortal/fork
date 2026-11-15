@@ -36,6 +36,8 @@
 
 mod anchor;
 mod delivery;
+#[cfg(test)]
+mod tests;
 
 use std::{
     io,
@@ -104,11 +106,13 @@ impl ProcessGroupGuard {
     ///
     /// Returns an operating-system error if descriptor preparation, the helper
     /// fork, or group reservation fails. The helper reports the errno with
-    /// which it failed to close inherited descriptors or to create or confirm
-    /// the anchor, such as `EACCES` from a sandbox; on targets that spawn the
+    /// which it failed to reset its signals, to close inherited descriptors or
+    /// to create or confirm the anchor, such as `EACCES` from a sandbox; on targets that spawn the
     /// anchor (macOS among them) a missing or exec-denied `/usr/bin/true`
     /// returns the spawn error. `TimedOut` means the helper did not report in
-    /// time, and `UnexpectedEof` that it exited without reporting. A started
+    /// time, and `UnexpectedEof` that it exited without reporting. Until a
+    /// new anchor has exited it holds a copy of the helper's socket, so a
+    /// helper lost in that window is also reported as `TimedOut`. A started
     /// helper's socket is closed; numeric-PID cleanup is attempted only while
     /// waitable ownership is proven. An auto-reaping owner cannot resume or kill
     /// a stopped helper and may need its own cleanup coordination.
@@ -178,7 +182,9 @@ impl ProcessGroupGuard {
     /// Returns `InvalidInput` for zero/oversized timeouts, a missing owner, or
     /// exhaustion of the guard's non-reused u32 request IDs,
     /// `TimedOut` at the deadline, and `BrokenPipe`/`UnexpectedEof` if the helper
-    /// is gone (the group must not then be signalled directly). Otherwise returns
+    /// is gone (the group must not then be signalled directly). While a stopped
+    /// anchor still holds its copy of the helper's socket, a lost helper is
+    /// reported as `TimedOut` instead; nothing is signalled either way. Otherwise returns
     /// the helper's kill errno, including macOS `EPERM` for an anchor-only group.
     pub fn signal_group(&self, signal: Signal, timeout: Duration) -> io::Result<()> {
         validate_timeout(timeout)?;
@@ -210,7 +216,9 @@ impl ProcessGroupGuard {
     /// kills it; the final reap waits for the kernel and has no absolute bound.
     /// If the owner violated the waitable-child policy, the socket is still
     /// closed but cleanup never signals a potentially reused helper PID. A
-    /// stopped helper then cannot be resumed by this guard.
+    /// stopped helper then cannot be resumed by this guard. If the policy
+    /// cannot be read at all, the query's error is returned and an exited
+    /// helper is still reaped, without any signal.
     pub fn disarm(mut self, timeout: Duration) -> io::Result<()> {
         validate_timeout(timeout)?;
         let Some(mut guard) = self.guard.take() else {
@@ -258,8 +266,8 @@ impl GuardHelper {
             }
             ProcessFork::Child => {
                 let descriptor = reader.as_raw_fd();
-                match descriptors
-                    .apply_in_child()
+                match child_reset_signals()
+                    .and_then(|()| descriptors.apply_in_child())
                     .and_then(|()| child_spawn_anchor(&anchor))
                 {
                     Ok(group) => {
@@ -347,7 +355,12 @@ impl GuardHelper {
         if self.retired {
             return Ok(());
         }
-        crate::child_signal::require_waitable_children()?;
+        if let Err(error) = crate::child_signal::require_waitable_children() {
+            if error.raw_os_error().is_some() {
+                self.collect_exited_without_signal(timeout);
+            }
+            return Err(error);
+        }
         match wait_for_clean_exit(self.process, timeout) {
             Ok(()) => {
                 self.retired = true;
@@ -361,6 +374,31 @@ impl GuardHelper {
             Err(HelperWaitFailure::ReapedOrUnknown(error)) => {
                 self.retired = true;
                 Err(error)
+            }
+        }
+    }
+
+    /// Collect the helper when the owner's SIGCHLD policy cannot be read.
+    ///
+    /// Without the policy nothing may be signalled, but the closed socket
+    /// still makes a running helper exit. A non-consuming observation that
+    /// shows this PID as an exited child proves children were waitable when
+    /// it exited, so it is the helper and not a later child reusing an
+    /// auto-reaped PID; only then is it reaped. A stopped helper, an
+    /// unavailable `waitid`, or the deadline leaves it as before.
+    fn collect_exited_without_signal(&mut self, timeout: Duration) {
+        let Some(deadline) = Instant::now().checked_add(timeout) else {
+            return;
+        };
+        loop {
+            match crate::wait::peek_exit_nohang(self.process) {
+                Ok(Some(_)) => {
+                    let _ = wait_event_nohang(self.process);
+                    self.retired = true;
+                    return;
+                }
+                Ok(None) if Instant::now() < deadline => std::thread::sleep(MAX_POLL_INTERVAL),
+                Ok(None) | Err(_) => return,
             }
         }
     }
@@ -420,7 +458,8 @@ fn set_nonblocking(descriptor: &OwnedFd) -> io::Result<()> {
 }
 
 /// The helper's startup record: a positive reserved group, or the negated errno
-/// with which closing descriptors or creating and confirming the anchor failed.
+/// with which resetting signals, closing descriptors, or creating and
+/// confirming the anchor failed.
 fn decode_group_record(record: libc::pid_t) -> io::Result<ProcessGroupId> {
     if record < 0 {
         let errno = record.checked_neg().unwrap_or(libc::EIO);
@@ -585,13 +624,12 @@ fn write_disarm(descriptor: RawFd) -> io::Result<()> {
 
 /// In the helper: create the anchor, which leads the group and exits at once.
 ///
-/// Signals are reset first, and the anchor is created without fork callbacks,
-/// so from here on only this helper can reap it. The helper then confirms that
+/// The caller reset the helper's signals first, and the anchor is created
+/// without fork callbacks, so from here on only this helper can reap it. The helper then confirms that
 /// a group with the anchor's ID exists. The anchor stays unreaped, so the
 /// group's ID is its PID and cannot be reused until the helper reaps it. On
 /// failure the errno is returned for the owner, after reaping any anchor.
 fn child_spawn_anchor(anchor: &PreparedAnchor) -> Result<ProcessGroupId, libc::c_int> {
-    child_reset_signals();
     let group = ProcessGroupId::new(anchor.child_create()?).ok_or(libc::EIO)?;
     loop {
         // SAFETY: the null signal delivers nothing; the negated positive ID
@@ -663,13 +701,19 @@ const DEFAULT_SIGNALS: &[libc::c_int] = &[
 /// inherited mask. A forked anchor inherits this state; it only calls setpgid
 /// and _exit, so it needs no reset of its own. The owner is untouched. All
 /// operations here are async-signal-safe.
-fn child_reset_signals() {
+///
+/// This runs before anything else in the helper, so cleanup's SIGCONT can
+/// never reach an inherited handler in a helper that stalled later. A failure
+/// returns the errno for the owner, such as `EPERM` from a sandbox that denies
+/// `sigaction`: with handlers possibly left in place the helper must not
+/// reserve a group.
+fn child_reset_signals() -> Result<(), libc::c_int> {
     // SAFETY: an all-zero sigaction is a valid value: no flags, and an empty
     // mask after sigemptyset; the handler is set per signal below.
     let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
     // SAFETY: sigemptyset initializes writable mask storage in this child.
     if unsafe { libc::sigemptyset(&raw mut action.sa_mask) } != 0 {
-        child_exit(FAILURE_EXIT);
+        return Err(crate::raw::last_errno());
     }
     // SAFETY: both sets are initialized by the signal calls below.
     let mut blocked: libc::sigset_t = unsafe { std::mem::zeroed() };
@@ -679,14 +723,14 @@ fn child_reset_signals() {
     if unsafe { libc::sigfillset(&raw mut blocked) } != 0
         || unsafe { libc::sigprocmask(libc::SIG_BLOCK, &raw const blocked, &raw mut previous) } != 0
     {
-        child_exit(FAILURE_EXIT);
+        return Err(crate::raw::last_errno());
     }
     // A signal set has at least one bit per supported signal on our Unix
     // targets. Cover the entire representable range, including realtime and
     // platform-specific signals; EINVAL skips holes and libc-reserved signals.
     for signal in 1..=size_of::<libc::sigset_t>() * 8 {
         let Ok(signal) = libc::c_int::try_from(signal) else {
-            child_exit(FAILURE_EXIT);
+            return Err(libc::EINVAL);
         };
         if signal == libc::SIGKILL || signal == libc::SIGSTOP {
             continue;
@@ -700,7 +744,7 @@ fn child_reset_signals() {
             match crate::raw::last_errno() {
                 libc::EINTR => {}
                 libc::EINVAL => break,
-                _ => child_exit(FAILURE_EXIT),
+                errno => return Err(errno),
             }
         }
     }
@@ -708,8 +752,9 @@ fn child_reset_signals() {
     if unsafe { libc::sigprocmask(libc::SIG_SETMASK, &raw const previous, std::ptr::null_mut()) }
         != 0
     {
-        child_exit(FAILURE_EXIT);
+        return Err(crate::raw::last_errno());
     }
+    Ok(())
 }
 
 /// The disposition the helper gives `signal`: default for
@@ -826,173 +871,4 @@ fn child_reap_anchor(group: ProcessGroupId) {
 fn child_exit(code: libc::c_int) -> ! {
     // SAFETY: helper children must not run inherited destructors after fork.
     unsafe { libc::_exit(code) }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{
-        GroupErrno, ProcessGroupGuard, child_send_record, classify_group_errno,
-        decode_group_record, failure_record,
-    };
-
-    /// A stopped helper can fill the request queue. Disarm must return an
-    /// error rather than block before the owner-loss cleanup can resume it.
-    #[test]
-    fn disarm_full_socket_does_not_block() -> std::io::Result<()> {
-        use std::os::fd::AsRawFd;
-        let (owner, _helper) = crate::socket_pair_cloexec()?.into_parts();
-        super::set_nonblocking(&owner)?;
-        let record = 0_u8;
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
-        loop {
-            // SAFETY: owner is live; record is one initialized byte. This
-            // fills only a test-owned socket, using nonblocking writes.
-            let sent = unsafe {
-                libc::send(
-                    owner.as_raw_fd(),
-                    (&raw const record).cast(),
-                    1,
-                    libc::MSG_NOSIGNAL | libc::MSG_DONTWAIT,
-                )
-            };
-            if sent < 0 {
-                assert_eq!(
-                    std::io::Error::last_os_error().kind(),
-                    std::io::ErrorKind::WouldBlock
-                );
-                break;
-            }
-            if std::time::Instant::now() >= deadline {
-                return Err(std::io::Error::other("socket did not fill"));
-            }
-        }
-        let result = super::write_disarm(owner.as_raw_fd());
-        assert!(matches!(result, Err(error) if error.kind() == std::io::ErrorKind::WouldBlock));
-        Ok(())
-    }
-
-    /// Disarm reaps the helper and then drops it. The drop must not repeat
-    /// cleanup against the reaped PID, which may by then name a newer child:
-    /// stand in for that reuse with a live child and require it untouched.
-    #[test]
-    fn dropped_helper_does_not_repeat_cleanup_after_disarm() -> std::io::Result<()> {
-        use std::time::Duration;
-        let mut helper = super::GuardHelper::spawn()?;
-        helper.read_group(Duration::from_secs(3))?;
-        helper.disarm_and_reap(Duration::from_secs(3))?;
-        assert!(helper.retired);
-
-        let bystander = match crate::fork_process()? {
-            crate::ProcessFork::Parent(process) => process,
-            crate::ProcessFork::Child => loop {
-                // SAFETY: pause is async-signal-safe; the test kills this child.
-                unsafe { libc::pause() };
-            },
-        };
-        helper.process = bystander;
-        drop(helper);
-        let observed = crate::wait_event_nohang(bystander);
-        // Always clean up before asserting; a repeated cleanup already reaped it.
-        if matches!(observed, Ok(None)) {
-            crate::signal_process(bystander, crate::Signal::KILL)?;
-            crate::wait_event(bystander)?;
-        }
-        assert!(
-            matches!(observed, Ok(None)),
-            "repeated cleanup touched a reused helper PID: {observed:?}"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn guard_preserves_auto_traits() {
-        fn require<T: Send + Sync + Unpin + std::panic::UnwindSafe + std::panic::RefUnwindSafe>() {}
-        require::<ProcessGroupGuard>();
-    }
-
-    #[test]
-    fn signal_rejects_a_taken_owner() -> std::io::Result<()> {
-        let mut guard = ProcessGroupGuard::new()?;
-        if let Some(helper) = guard.guard.as_mut() {
-            drop(helper.owner.take());
-        }
-        let result = guard.signal_group(crate::Signal::KILL, std::time::Duration::from_secs(1));
-        assert!(matches!(result, Err(error) if error.kind() == std::io::ErrorKind::InvalidInput));
-        Ok(())
-    }
-
-    /// The startup record carries a positive group or a negated errno, so the
-    /// owner reports why the helper could not reserve a group.
-    #[test]
-    fn group_record_reports_helper_errno() {
-        assert!(matches!(decode_group_record(4242), Ok(group) if group.get() == 4242));
-        let denied = decode_group_record(failure_record(libc::EACCES));
-        assert!(matches!(denied, Err(error) if error.raw_os_error() == Some(libc::EACCES)));
-        for malformed in [0, -1, libc::c_int::MIN] {
-            assert_eq!(failure_record(malformed), -libc::EIO);
-        }
-        assert_eq!(failure_record(0), -libc::EIO);
-        let overflow = decode_group_record(libc::pid_t::MIN);
-        assert!(matches!(overflow, Err(error) if error.raw_os_error() == Some(libc::EIO)));
-        assert!(
-            matches!(decode_group_record(0), Err(error) if error.kind() == std::io::ErrorKind::InvalidData)
-        );
-    }
-
-    /// The helper's failure record crosses the socket intact.
-    #[test]
-    fn helper_failure_record_crosses_the_socket() -> std::io::Result<()> {
-        use std::{io::Read, os::fd::AsRawFd};
-        let (owner, helper) = crate::socket_pair_cloexec()?.into_parts();
-        child_send_record(helper.as_raw_fd(), failure_record(libc::ENOENT));
-        let mut record = [0_u8; 4];
-        std::fs::File::from(owner).read_exact(&mut record)?;
-        let decoded = decode_group_record(libc::pid_t::from_ne_bytes(record));
-        assert!(matches!(decoded, Err(error) if error.raw_os_error() == Some(libc::ENOENT)));
-        Ok(())
-    }
-
-    /// The pin and cleanup's resume need default SIGCHLD and SIGCONT, and a
-    /// faulting helper must still die; every other signal is ignored so a
-    /// signal to the owner's group cannot end the helper.
-    #[test]
-    fn helper_ignores_everything_but_its_pin_resume_and_faults() {
-        use super::helper_disposition;
-        for signal in [
-            libc::SIGCHLD,
-            libc::SIGCONT,
-            libc::SIGSEGV,
-            libc::SIGBUS,
-            libc::SIGSYS,
-        ] {
-            assert_eq!(helper_disposition(signal), libc::SIG_DFL);
-        }
-        for signal in [
-            libc::SIGHUP,
-            libc::SIGINT,
-            libc::SIGQUIT,
-            libc::SIGTERM,
-            libc::SIGPIPE,
-            libc::SIGUSR1,
-            libc::SIGUSR2,
-            libc::SIGTSTP,
-        ] {
-            assert_eq!(helper_disposition(signal), libc::SIG_IGN);
-        }
-    }
-
-    /// `EPERM` keeps the anchor's group reserved, because macOS answers it for
-    /// a group whose only member is the unreaped anchor; only `EINTR` retries,
-    /// and every other answer means no group is reserved.
-    #[test]
-    fn group_errno_treats_eperm_as_a_reserved_group() {
-        assert_eq!(classify_group_errno(Some(libc::EPERM)), GroupErrno::Present);
-        assert_eq!(
-            classify_group_errno(Some(libc::EINTR)),
-            GroupErrno::Interrupted
-        );
-        for failed in [Some(libc::ESRCH), Some(libc::EINVAL), None] {
-            assert_eq!(classify_group_errno(failed), GroupErrno::Failed);
-        }
-    }
 }

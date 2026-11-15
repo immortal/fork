@@ -32,6 +32,8 @@ pub(super) fn run() -> Result<(), Box<dyn Error>> {
             "guard-deadline" => deadline_collection(),
             "continue-handler" => inherited_continue_handler(),
             "continue-denied" => unavailable_continue(),
+            "policy-denied" => unreadable_policy(),
+            "reset-denied" => denied_helper_reset(),
             "reaper-delivery" => inherited_reaper::run(false),
             "reaper-loss" => inherited_reaper::run(true),
             "waitid-daemon" | "waitid-failure" | "waitid-guard" => waitid_fallback::run(&mode),
@@ -112,6 +114,8 @@ fn cases() -> Vec<(&'static str, Option<libc::c_int>)> {
         "guard-deadline",
         "continue-handler",
         "continue-denied",
+        "policy-denied",
+        "reset-denied",
         "reaper-delivery",
         "reaper-loss",
     ]
@@ -192,6 +196,30 @@ fn inherited_continue_handler() -> Result<(), Box<dyn Error>> {
 fn unavailable_continue() -> Result<(), Box<dyn Error>> {
     ProcessGroupGuard::new()?.disarm(BOUND)?;
     Ok(())
+}
+
+/// A denied policy query forbids every signal, but the disarmed helper still
+/// exits and must be reaped rather than left a zombie until the owner exits.
+fn unreadable_policy() -> Result<(), Box<dyn Error>> {
+    let guard = ProcessGroupGuard::new()?;
+    let helper = guard.guard_process();
+    let result = guard.disarm(BOUND);
+    assert!(matches!(&result, Err(error) if error.raw_os_error() == Some(libc::EPERM)));
+    let collected = fork::wait_event_nohang(helper);
+    assert!(
+        matches!(&collected, Err(error) if error.raw_os_error() == Some(libc::ECHILD)),
+        "the exited helper was left unreaped: {collected:?}"
+    );
+    Ok(())
+}
+
+/// A helper that cannot reset its signals must not reserve a group, and the
+/// owner must learn the errno rather than an unexplained end of file.
+fn denied_helper_reset() -> Result<(), Box<dyn Error>> {
+    match ProcessGroupGuard::new() {
+        Err(error) if error.raw_os_error() == Some(libc::EPERM) => Ok(()),
+        other => Err(format!("a denied signal reset was not reported: {other:?}").into()),
+    }
 }
 
 /// Keep STOP pending state out of the production wait, matching an all-child drain.

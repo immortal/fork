@@ -164,8 +164,9 @@ fn waitid_unavailable(error: &io::Error) -> bool {
     error.raw_os_error().is_some()
 }
 
-/// Observe without consuming; only `observe_exit_nohang` may handle unavailability.
-fn peek_exit_nohang(process: ProcessId) -> io::Result<Option<ChildEvent>> {
+/// Observe without consuming. `observe_exit_nohang` handles unavailability by
+/// falling back; a caller that must not consume treats any error as no proof.
+pub(crate) fn peek_exit_nohang(process: ProcessId) -> io::Result<Option<ChildEvent>> {
     let id = libc::id_t::try_from(i128::from(process.get()))
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
     loop {
