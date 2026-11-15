@@ -32,6 +32,29 @@ both caused by system calls the owner now makes and 0.10.0 did not.
   had reused that PID for a new child, the child was resumed, then killed and
   reaped after three seconds. Cleanup now runs once; a cleanup that could not
   prove the helper gone is still retried on drop.
+* The guard helper shares the owner's process group and used to restore the
+  default action of every signal the owner handled. A signal sent to that
+  group, such as a terminal interrupt or `kill -TERM -<pgid>`, then killed the
+  helper while the owner handled it and lived on: `signal_group` returned
+  `BrokenPipe` and the workload outlived the owner uncontained. The helper now
+  ignores every signal except `SIGCHLD` and `SIGCONT`, which the pin and
+  cleanup's resume need, and the fault signals `SIGABRT`, `SIGBUS`, `SIGFPE`,
+  `SIGILL`, `SIGSEGV`, `SIGSYS` and `SIGTRAP`. It still exits when the owner
+  closes or loses the socket, and `SIGKILL` and `SIGSTOP` stay effective.
+* `DaemonNotifier::notify_ready` and `fail_and_exit` wrote to the startup pipe
+  with `SIGPIPE` at its default action under the default
+  `ChildSignalState::Reset`, so a daemon whose invoker was gone was killed
+  inside the call instead of receiving the documented `EPIPE`. Both now block
+  `SIGPIPE` in the calling thread for the write and consume the one it raised.
+
+### Compatibility
+* A guard helper no longer terminates on a catchable signal such as `SIGTERM`
+  sent to its PID; only owner loss, disarm, `SIGKILL` or a fault ends it. Code
+  that stopped a helper that way must drop or disarm the guard instead.
+* `notify_ready` and `fail_and_exit` now call `pthread_sigmask` and
+  `sigpending` in the daemon, and `sigwait` after an `EPIPE`. If the mask
+  cannot be read or changed, the write runs unprotected as in 0.11.0. A
+  sandbox that kills on these calls must permit them.
 
 ### Under review
 Reported by a model review of the released 0.11.0 and not yet changed. Confirm
@@ -78,17 +101,6 @@ each before the next release, then fix it or drop it.
   the exact-child wait, so the helper, which still exits, stays a zombie until
   the owner exits. Signalling nothing is the documented fail-closed behavior,
   but an exact-child wait sends no signal and could still collect it.
-* Helper and the owner's group: the guard helper stays in the owner's process
-  group and resets every handled signal to its default action. A signal sent
-  to that group, such as a terminal interrupt or `kill -TERM -<pgid>`, kills
-  the helper while an owner that handles the signal survives. `signal_group`
-  then returns `BrokenPipe`, and the workload outlives the owner uncontained.
-  Reproduced on Linux. Ignoring catchable signals in the helper, or moving it
-  out of the owner's group, would keep the guard; otherwise document it.
-* Readiness and `SIGPIPE`: `DaemonNotifier::notify_ready` and `fail_and_exit`
-  use a plain `write`. The default `ChildSignalState::Reset` restores
-  `SIGPIPE`, so a daemon whose invoker is gone is killed inside the call
-  instead of receiving the documented `EPIPE`. Reproduced on Linux.
 
 ## 0.11.0
 
