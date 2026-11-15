@@ -24,6 +24,17 @@ deprecated in macOS 10.5. By using `fork` and `setsid` syscalls, new methods
 can be created to achieve the same goal
 - Provides the building blocks for creating proper Unix daemons
 
+## Supported platforms
+
+Linux, FreeBSD and macOS are supported: every change is tested on all three,
+and the safety guarantees below are stated for them. The crate also compiles
+for other Unix targets, but nothing is tested or claimed there. Android in
+particular is not supported: its C library lets applications handle signals
+in the range it reserves for itself, and on 32-bit Android the signal mask
+the guard helper blocks during its reset covers only the first 32 signals,
+so `ProcessGroupGuard` cannot promise there that no inherited handler runs
+in the helper.
+
 ## Installation
 
 Add `fork` to your `Cargo.toml`:

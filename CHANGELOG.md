@@ -31,6 +31,12 @@ both caused by system calls the owner now makes and 0.10.0 did not.
   file, so `new` and `signal_group` return `TimedOut` instead of
   `UnexpectedEof` or `BrokenPipe`. Nothing is signalled; the error
   documentation now says so.
+* The README now states the supported platforms: Linux, FreeBSD and macOS.
+  Other Unix targets compile but are untested, and Android is not supported.
+  A review of this release showed that on Android an inherited handler can
+  remain in the guard helper (signals the C library reserves are still
+  settable, and 32-bit Android cannot block realtime signals during the
+  reset), so the guard's guarantees are not claimed there.
 * When the owner's SIGCHLD policy cannot be read, disarm and drop return the
   query's error before waiting, and the helper, which still exits, stays a
   zombie until the owner exits. Collecting it was tried and withdrawn: an
