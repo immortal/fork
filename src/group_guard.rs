@@ -217,8 +217,9 @@ impl ProcessGroupGuard {
     /// If the owner violated the waitable-child policy, the socket is still
     /// closed but cleanup never signals a potentially reused helper PID. A
     /// stopped helper then cannot be resumed by this guard. If the policy
-    /// cannot be read at all, the query's error is returned and an exited
-    /// helper is still reaped, without any signal.
+    /// cannot be read at all, the query's error is returned and the helper,
+    /// which still exits, stays unreaped until the owner exits: nothing
+    /// portable proves that an exited child with its PID is the helper.
     pub fn disarm(mut self, timeout: Duration) -> io::Result<()> {
         validate_timeout(timeout)?;
         let Some(mut guard) = self.guard.take() else {
@@ -349,18 +350,15 @@ impl GuardHelper {
     ///
     /// Disarm cleans up and then drops the helper. Without `retired` the drop
     /// would wait on, resume, and finally kill a PID that was already reaped
-    /// and may belong to a newer child. A cleanup that could not prove the
-    /// helper gone leaves it unretired, so the drop still retries.
+    /// and may belong to a newer child. Only a reaped helper, or one the
+    /// kernel no longer knows as a child, is retired: a cleanup that was
+    /// refused before it could wait, or whose wait failed without consuming
+    /// anything, leaves it unretired, so the drop still retries.
     fn finish(&mut self, timeout: Duration) -> io::Result<()> {
         if self.retired {
             return Ok(());
         }
-        if let Err(error) = crate::child_signal::require_waitable_children() {
-            if error.raw_os_error().is_some() {
-                self.collect_exited_without_signal(timeout);
-            }
-            return Err(error);
-        }
+        crate::child_signal::require_waitable_children()?;
         match wait_for_clean_exit(self.process, timeout) {
             Ok(()) => {
                 self.retired = true;
@@ -371,35 +369,13 @@ impl GuardHelper {
                 self.retired = true;
                 Err(error)
             }
-            Err(HelperWaitFailure::ReapedOrUnknown(error)) => {
+            Err(HelperWaitFailure::Reaped(error)) => {
                 self.retired = true;
                 Err(error)
             }
-        }
-    }
-
-    /// Collect the helper when the owner's SIGCHLD policy cannot be read.
-    ///
-    /// Without the policy nothing may be signalled, but the closed socket
-    /// still makes a running helper exit. A non-consuming observation that
-    /// shows this PID as an exited child proves children were waitable when
-    /// it exited, so it is the helper and not a later child reusing an
-    /// auto-reaped PID; only then is it reaped. A stopped helper, an
-    /// unavailable `waitid`, or the deadline leaves it as before.
-    fn collect_exited_without_signal(&mut self, timeout: Duration) {
-        let Some(deadline) = Instant::now().checked_add(timeout) else {
-            return;
-        };
-        loop {
-            match crate::wait::peek_exit_nohang(self.process) {
-                Ok(Some(_)) => {
-                    let _ = wait_event_nohang(self.process);
-                    self.retired = true;
-                    return;
-                }
-                Ok(None) if Instant::now() < deadline => std::thread::sleep(MAX_POLL_INTERVAL),
-                Ok(None) | Err(_) => return,
-            }
+            // Nothing was consumed, so the helper may still be an unreaped
+            // child: leave it unretired and let the drop try again.
+            Err(HelperWaitFailure::Unobserved(error)) => Err(error),
         }
     }
 
@@ -422,8 +398,11 @@ impl Drop for GuardHelper {
 enum HelperWaitFailure {
     /// The helper remains an owned child, so its PID cannot yet be reused.
     StillLive(io::Error),
-    /// A terminal event was already reaped or child ownership is no longer provable.
-    ReapedOrUnknown(io::Error),
+    /// A terminal event was reaped, or the PID is no longer a child (`ECHILD`):
+    /// it may name another process and must never be waited on again.
+    Reaped(io::Error),
+    /// A wait failed without consuming anything, such as a denied system call.
+    Unobserved(io::Error),
 }
 
 /// Make the owner endpoint nonblocking before the helper exists.
@@ -529,7 +508,7 @@ fn wait_ready(descriptor: RawFd, events: libc::c_short, deadline: Instant) -> io
 
 fn wait_for_clean_exit(process: ProcessId, timeout: Duration) -> Result<(), HelperWaitFailure> {
     let deadline = Instant::now().checked_add(timeout).ok_or_else(|| {
-        HelperWaitFailure::ReapedOrUnknown(io::Error::new(
+        HelperWaitFailure::Unobserved(io::Error::new(
             io::ErrorKind::InvalidInput,
             "guard cleanup timeout exceeds the monotonic clock range",
         ))
@@ -562,7 +541,10 @@ fn wait_for_clean_exit(process: ProcessId, timeout: Duration) -> Result<(), Help
             Ok(Some(event)) => {
                 return helper_exit_result(event);
             }
-            Err(error) => return Err(HelperWaitFailure::ReapedOrUnknown(error)),
+            Err(error) if error.raw_os_error() == Some(libc::ECHILD) => {
+                return Err(HelperWaitFailure::Reaped(error));
+            }
+            Err(error) => return Err(HelperWaitFailure::Unobserved(error)),
         }
         initial = false;
         let now = Instant::now();
@@ -585,9 +567,9 @@ fn wait_for_clean_exit(process: ProcessId, timeout: Duration) -> Result<(), Help
 fn helper_exit_result(event: crate::ChildEvent) -> Result<(), HelperWaitFailure> {
     match event {
         crate::ChildEvent::Exited { code: 0, .. } => Ok(()),
-        other => Err(HelperWaitFailure::ReapedOrUnknown(io::Error::other(
-            format!("process-group helper terminated unexpectedly: {other:?}"),
-        ))),
+        other => Err(HelperWaitFailure::Reaped(io::Error::other(format!(
+            "process-group helper terminated unexpectedly: {other:?}"
+        )))),
     }
 }
 
@@ -686,6 +668,14 @@ const DEFAULT_SIGNALS: &[libc::c_int] = &[
     libc::SIGSEGV,
     libc::SIGSYS,
     libc::SIGTRAP,
+    #[cfg(any(
+        target_vendor = "apple",
+        target_os = "freebsd",
+        target_os = "dragonfly",
+        target_os = "netbsd",
+        target_os = "openbsd",
+    ))]
+    libc::SIGEMT,
 ];
 
 /// Remove every application handler from the helper before it has children.
@@ -703,10 +693,13 @@ const DEFAULT_SIGNALS: &[libc::c_int] = &[
 /// operations here are async-signal-safe.
 ///
 /// This runs before anything else in the helper, so cleanup's SIGCONT can
-/// never reach an inherited handler in a helper that stalled later. A failure
-/// returns the errno for the owner, such as `EPERM` from a sandbox that denies
-/// `sigaction`: with handlers possibly left in place the helper must not
-/// reserve a group.
+/// never reach an inherited handler in a helper that stalled later. Each
+/// disposition is read first. Setting SIGCHLD and SIGCONT and removing an
+/// inherited handler are required: their failure, whatever the errno, returns
+/// it for the owner, such as `EPERM` from a sandbox that denies `sigaction`,
+/// because with a handler possibly left in place the helper must not reserve
+/// a group. Ignoring a signal that had no handler only hardens the helper, so
+/// a refusal there is tolerated and creation succeeds as it did in 0.11.0.
 fn child_reset_signals() -> Result<(), libc::c_int> {
     // SAFETY: an all-zero sigaction is a valid value: no flags, and an empty
     // mask after sigemptyset; the handler is set per signal below.
@@ -727,7 +720,7 @@ fn child_reset_signals() -> Result<(), libc::c_int> {
     }
     // A signal set has at least one bit per supported signal on our Unix
     // targets. Cover the entire representable range, including realtime and
-    // platform-specific signals; EINVAL skips holes and libc-reserved signals.
+    // platform-specific signals.
     for signal in 1..=size_of::<libc::sigset_t>() * 8 {
         let Ok(signal) = libc::c_int::try_from(signal) else {
             return Err(libc::EINVAL);
@@ -735,7 +728,19 @@ fn child_reset_signals() -> Result<(), libc::c_int> {
         if signal == libc::SIGKILL || signal == libc::SIGSTOP {
             continue;
         }
-        action.sa_sigaction = helper_disposition(signal);
+        let Some(inherited) = child_query_disposition(signal)? else {
+            continue;
+        };
+        let wanted = helper_disposition(signal);
+        // The pin, cleanup's resume, and the removal of every application
+        // handler are what the guard's safety rests on.
+        let required = signal == libc::SIGCHLD
+            || signal == libc::SIGCONT
+            || (inherited != libc::SIG_DFL && inherited != libc::SIG_IGN);
+        if !required && inherited == wanted {
+            continue;
+        }
+        action.sa_sigaction = wanted;
         loop {
             // SAFETY: initialized action; changes only this helper's disposition.
             if unsafe { libc::sigaction(signal, &raw const action, std::ptr::null_mut()) } == 0 {
@@ -743,8 +748,12 @@ fn child_reset_signals() -> Result<(), libc::c_int> {
             }
             match crate::raw::last_errno() {
                 libc::EINTR => {}
-                libc::EINVAL => break,
-                errno => return Err(errno),
+                // The query proved the signal exists, so no errno, EINVAL
+                // included, can mean an unsupported signal here.
+                errno if required => return Err(errno),
+                // No handler is installed, so nothing foreign can run. The
+                // helper only stays exposed to this one signal, as in 0.11.0.
+                _ => break,
             }
         }
     }
@@ -755,6 +764,24 @@ fn child_reset_signals() -> Result<(), libc::c_int> {
         return Err(crate::raw::last_errno());
     }
     Ok(())
+}
+
+/// Read one inherited disposition; `None` for a number the kernel or the C
+/// library does not support, which is the only meaning of `EINVAL` here.
+fn child_query_disposition(signal: libc::c_int) -> Result<Option<libc::sighandler_t>, libc::c_int> {
+    // SAFETY: sigaction initializes this output on success.
+    let mut inherited: libc::sigaction = unsafe { std::mem::zeroed() };
+    loop {
+        // SAFETY: reads one disposition into live storage.
+        if unsafe { libc::sigaction(signal, std::ptr::null(), &raw mut inherited) } == 0 {
+            return Ok(Some(inherited.sa_sigaction));
+        }
+        match crate::raw::last_errno() {
+            libc::EINTR => {}
+            libc::EINVAL => return Ok(None),
+            errno => return Err(errno),
+        }
+    }
 }
 
 /// The disposition the helper gives `signal`: default for

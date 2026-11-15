@@ -50,6 +50,13 @@ ssize_t read(int fd, void *buffer, size_t length) {
 }
 pid_t waitpid(pid_t pid, int *status, int flags) {
     pid_t (*real)(pid_t, int *, int) = dlsym(RTLD_NEXT, "waitpid");
+    static int wait_denied;
+    if (getpid() == owner && named("wait-denied") && (flags & WNOHANG) && !wait_denied) {
+        /* One wait refused before it could consume anything. */
+        wait_denied = 1;
+        errno = EPERM;
+        return -1;
+    }
     if (getpid() == owner && named("waitid-guard") && flags == WNOHANG) {
         /* Force exit into the gap before fallback observation, without consuming
          * it anywhere else. The helper is released by the preceding idle wait. */
@@ -78,6 +85,18 @@ int execve(const char *path, char *const argv[], char *const envp[]) {
 }
 int sigaction(int sig, const struct sigaction *action, struct sigaction *previous) {
     int (*real)(int, const struct sigaction *, struct sigaction *) = dlsym(RTLD_NEXT, "sigaction");
+    if (getpid() != owner && action && sig == SIGUSR1 && named("reset-einval")) {
+        /* A sandbox that refuses to remove one inherited handler, with the
+         * errno that also marks an unsupported signal number. */
+        errno = EINVAL;
+        return -1;
+    }
+    if (getpid() != owner && action && sig == SIGHUP && named("reset-optional")) {
+        /* A sandbox that refuses a setter the helper needs only as hardening:
+         * SIGHUP has no handler, so 0.11.0 never set it. */
+        errno = EPERM;
+        return -1;
+    }
     if (getpid() != owner && action && named("reset-denied")) {
         /* A sandbox that denies the helper's own signal reset with an errno. */
         errno = EPERM;

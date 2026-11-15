@@ -34,6 +34,9 @@ pub(super) fn run() -> Result<(), Box<dyn Error>> {
             "continue-denied" => unavailable_continue(),
             "policy-denied" => unreadable_policy(),
             "reset-denied" => denied_helper_reset(),
+            "reset-einval" => handler_removal_refused_with_einval(),
+            "reset-optional" => optional_reset_refused(),
+            "wait-denied" => refused_wait_is_retried(),
             "reaper-delivery" => inherited_reaper::run(false),
             "reaper-loss" => inherited_reaper::run(true),
             "waitid-daemon" | "waitid-failure" | "waitid-guard" => waitid_fallback::run(&mode),
@@ -116,6 +119,9 @@ fn cases() -> Vec<(&'static str, Option<libc::c_int>)> {
         "continue-denied",
         "policy-denied",
         "reset-denied",
+        "reset-einval",
+        "reset-optional",
+        "wait-denied",
         "reaper-delivery",
         "reaper-loss",
     ]
@@ -198,19 +204,25 @@ fn unavailable_continue() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// A denied policy query forbids every signal, but the disarmed helper still
-/// exits and must be reaped rather than left a zombie until the owner exits.
+/// A denied policy query forbids every signal and, because nothing portable
+/// proves that an exited child with the helper's PID is the helper, every
+/// wait too: the disarmed helper exits and stays unreaped for the owner.
 fn unreadable_policy() -> Result<(), Box<dyn Error>> {
     let guard = ProcessGroupGuard::new()?;
     let helper = guard.guard_process();
     let result = guard.disarm(BOUND);
     assert!(matches!(&result, Err(error) if error.raw_os_error() == Some(libc::EPERM)));
-    let collected = fork::wait_event_nohang(helper);
-    assert!(
-        matches!(&collected, Err(error) if error.raw_os_error() == Some(libc::ECHILD)),
-        "the exited helper was left unreaped: {collected:?}"
-    );
-    Ok(())
+    let deadline = Instant::now() + BOUND;
+    loop {
+        match fork::wait_event_nohang(helper)? {
+            Some(ChildEvent::Exited { code: 0, .. }) => return Ok(()),
+            Some(other) => return Err(format!("helper ended unexpectedly: {other:?}").into()),
+            None if Instant::now() >= deadline => {
+                return Err("the disarmed helper did not exit".into());
+            }
+            None => thread::sleep(POLL),
+        }
+    }
 }
 
 /// A helper that cannot reset its signals must not reserve a group, and the
@@ -219,6 +231,43 @@ fn denied_helper_reset() -> Result<(), Box<dyn Error>> {
     match ProcessGroupGuard::new() {
         Err(error) if error.raw_os_error() == Some(libc::EPERM) => Ok(()),
         other => Err(format!("a denied signal reset was not reported: {other:?}").into()),
+    }
+}
+
+extern "C" fn inherited_handler(_: libc::c_int) {}
+
+/// Removing an inherited handler is required: a refusal must fail creation
+/// even with `EINVAL`, which otherwise only marks an unsupported signal.
+fn handler_removal_refused_with_einval() -> Result<(), Box<dyn Error>> {
+    let _handler = install(libc::SIGUSR1, inherited_handler as *const () as usize, 0)?;
+    match ProcessGroupGuard::new() {
+        Err(error) if error.raw_os_error() == Some(libc::EINVAL) => Ok(()),
+        other => Err(format!("a handler left in the helper was accepted: {other:?}").into()),
+    }
+}
+
+/// Ignoring a signal that has no handler only hardens the helper, so a
+/// sandbox that refuses that setter must not fail a guard 0.11.0 created.
+fn optional_reset_refused() -> Result<(), Box<dyn Error>> {
+    let guard = ProcessGroupGuard::new()?;
+    let helper = guard.guard_process();
+    guard.disarm(BOUND)?;
+    match fork::wait_event_nohang(helper) {
+        Err(error) if error.raw_os_error() == Some(libc::ECHILD) => Ok(()),
+        other => Err(format!("disarm left the helper behind: {other:?}").into()),
+    }
+}
+
+/// A wait refused before it consumed anything must not retire the helper:
+/// disarm reports the error and the drop that follows still collects it.
+fn refused_wait_is_retried() -> Result<(), Box<dyn Error>> {
+    let guard = ProcessGroupGuard::new()?;
+    let helper = guard.guard_process();
+    let result = guard.disarm(BOUND);
+    assert!(matches!(&result, Err(error) if error.raw_os_error() == Some(libc::EPERM)));
+    match fork::wait_event_nohang(helper) {
+        Err(error) if error.raw_os_error() == Some(libc::ECHILD) => Ok(()),
+        other => Err(format!("the helper was not collected on drop: {other:?}").into()),
     }
 }
 

@@ -324,10 +324,18 @@ the anchor, and waits for helper cleanup under the deadline described below.
   present even after every workload member has gone. A group whose only member is the
   anchor has nothing live to signal; macOS, which skips zombie members,
   answers a signal to it with `EPERM`. Disarming releases the pin, so a
-  disarmed group's ID may be reused and must never be signalled again. The helper
-  gives every catchable signal exec-like dispositions before forking the anchor:
-  application handlers become `SIG_DFL`, and ignored signals stay ignored except
-  `SIGCHLD` (default to retain the zombie) and `SIGCONT` (default for cleanup).
+  disarmed group's ID may be reused and must never be signalled again. Before
+  anything else, the helper removes every application handler and ignores
+  every catchable signal except `SIGCHLD` (default to retain the zombie),
+  `SIGCONT` (default for cleanup) and the fault signals (`SIGABRT`, `SIGBUS`,
+  `SIGFPE`, `SIGILL`, `SIGSEGV`, `SIGSYS`, `SIGTRAP` and, where it exists,
+  `SIGEMT`), which keep their default action so a broken helper still dies.
+  The helper shares the owner's process group, so this is what keeps a signal
+  sent to that group, such as a terminal interrupt, from ending the helper
+  while the owner handles it and lives on. Removing a handler and setting
+  `SIGCHLD` and `SIGCONT` are required and fail guard creation with the errno
+  when refused; ignoring a handler-free signal is hardening, and a sandbox
+  that refuses that setter leaves the helper exposed to that one signal.
   The helper, a post-fork child limited to async-signal-safe calls, then never
   calls `fork(3)`, which would run the application's `pthread_atfork` handlers
   inside it after the anchor exists. Linux and Android on architectures whose
@@ -354,8 +362,9 @@ the anchor, and waits for helper cleanup under the deadline described below.
   process creation (`clone3` or a vfork-style `clone`) is permitted; a sandbox
   that denies either makes creation fail.
   The owner's handlers and mask are untouched.
-  A signal whose default terminates the helper can still cause helper loss; that
-  disables delivery, never authorizes an unpinned numeric fallback.
+  `SIGKILL`, a fault, or a signal the helper could not ignore can still cause
+  helper loss; that disables delivery, never authorizes an unpinned numeric
+  fallback.
 - After the final helper-mediated kill, disarm to release the anchor before
   waiting with `process_group_exists` and a deadline: the armed anchor itself
   otherwise keeps the probe true. Never signal the group after disarming.

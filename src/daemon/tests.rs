@@ -15,14 +15,14 @@ fn wire_stage_rejects_parent_only_first_fork() {
     assert_eq!(daemon_stage_from_wire(1), None);
 }
 
-/// With SIGPIPE at its default action, as `ChildSignalState::Reset`
-/// leaves it, a notifier whose invoker is gone must get `EPIPE` back and
-/// keep its signal mask and pending set unchanged.
+/// With SIGPIPE at its default action, as `ChildSignalState::Reset` leaves
+/// it, a notifier whose invoker is gone must get `EPIPE` back and must not be
+/// killed by the signal.
 #[test]
 fn notifier_reports_a_lost_invoker_without_sigpipe() -> std::io::Result<()> {
     use std::os::fd::AsRawFd;
-    let (reader, writer) = crate::pipe_cloexec()?.into_parts();
-    // No reader may remain anywhere, or the child's write would succeed.
+    let (reader, writer) = super::startup_channel()?;
+    // No reader may remain anywhere, or the child's send would succeed.
     drop(reader);
     let process = match crate::fork_process()? {
         crate::ProcessFork::Parent(process) => process,
@@ -31,11 +31,7 @@ fn notifier_reports_a_lost_invoker_without_sigpipe() -> std::io::Result<()> {
             unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
             let record = WireRecord::new(super::RECORD_READY, DaemonStage::Initialization, 0);
             let result = super::write_record_without_sigpipe(writer.as_raw_fd(), record);
-            let code = match (result, crate::sigpipe::is_pending()) {
-                (Err(libc::EPIPE), Some(false)) => 0,
-                (Err(libc::EPIPE), _) => 3,
-                _ => 4,
-            };
+            let code = i32::from(result != Err(libc::EPIPE));
             // SAFETY: the test child must not run the harness's destructors.
             unsafe { libc::_exit(code) }
         }
@@ -50,6 +46,23 @@ fn notifier_reports_a_lost_invoker_without_sigpipe() -> std::io::Result<()> {
         },
         "the notifier did not report EPIPE cleanly"
     );
+    Ok(())
+}
+
+/// Where a sandbox refused the socket the channel is the pipe of 0.11.0; the
+/// notifier must still deliver its record through it.
+#[test]
+fn notifier_record_crosses_the_pipe_fallback() -> std::io::Result<()> {
+    use std::{io::Read, os::fd::AsRawFd};
+    let (reader, writer) = crate::pipe_cloexec()?.into_parts();
+    let record = WireRecord::new(super::RECORD_READY, DaemonStage::Initialization, 0);
+    super::write_record_without_sigpipe(writer.as_raw_fd(), record)
+        .map_err(std::io::Error::from_raw_os_error)?;
+    drop(writer);
+    let mut bytes = Vec::new();
+    std::fs::File::from(reader).read_to_end(&mut bytes)?;
+    assert_eq!(bytes.len(), size_of::<WireRecord>());
+    assert_eq!(bytes.get(8), Some(&super::RECORD_READY));
     Ok(())
 }
 

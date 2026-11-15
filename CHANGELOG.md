@@ -31,6 +31,12 @@ both caused by system calls the owner now makes and 0.10.0 did not.
   file, so `new` and `signal_group` return `TimedOut` instead of
   `UnexpectedEof` or `BrokenPipe`. Nothing is signalled; the error
   documentation now says so.
+* When the owner's SIGCHLD policy cannot be read, disarm and drop return the
+  query's error before waiting, and the helper, which still exits, stays a
+  zombie until the owner exits. Collecting it was tried and withdrawn: an
+  exited child with the helper's PID is not proven to be the helper, because
+  a helper auto-reaped earlier may have had its PID reused, and nothing
+  portable identifies a process beyond its PID.
 
 ### Fixed
 * `PreparedCommand::spawn` with a timeout beyond the monotonic clock's range,
@@ -40,8 +46,10 @@ both caused by system calls the owner now makes and 0.10.0 did not.
 * `ProcessGroupGuard::disarm` cleaned up its helper and then dropped it, and
   the drop repeated the cleanup against the already reaped PID. If the owner
   had reused that PID for a new child, the child was resumed, then killed and
-  reaped after three seconds. Cleanup now runs once; a cleanup that could not
-  prove the helper gone is still retried on drop.
+  reaped after three seconds. Cleanup now runs once after the helper was
+  reaped or is no longer a child. A cleanup that was refused before it could
+  wait, or whose wait failed without consuming anything, is still retried on
+  drop.
 * The guard helper shares the owner's process group and used to restore the
   default action of every signal the owner handled. A signal sent to that
   group, such as a terminal interrupt or `kill -TERM -<pgid>`, then killed the
@@ -49,25 +57,28 @@ both caused by system calls the owner now makes and 0.10.0 did not.
   `BrokenPipe` and the workload outlived the owner uncontained. The helper now
   ignores every signal except `SIGCHLD` and `SIGCONT`, which the pin and
   cleanup's resume need, and the fault signals `SIGABRT`, `SIGBUS`, `SIGFPE`,
-  `SIGILL`, `SIGSEGV`, `SIGSYS` and `SIGTRAP`. It still exits when the owner
-  closes or loses the socket, and `SIGKILL` and `SIGSTOP` stay effective.
+  `SIGILL`, `SIGSEGV`, `SIGSYS`, `SIGTRAP` and, where it exists, `SIGEMT`. It
+  still exits when the owner closes or loses the socket, and `SIGKILL` and
+  `SIGSTOP` stay effective. Setting `SIGCHLD` and `SIGCONT` and removing an
+  inherited handler remain required, as in 0.11.0: a refusal fails guard
+  creation whatever its errno. Ignoring a signal that had no handler is
+  hardening only, so a sandbox that refuses that setter still gets its guard,
+  exposed to that one signal as before.
 * `DaemonNotifier::notify_ready` and `fail_and_exit` wrote to the startup pipe
   with `SIGPIPE` at its default action under the default
   `ChildSignalState::Reset`, so a daemon whose invoker was gone was killed
-  inside the call instead of receiving the documented `EPIPE`. Both now block
-  `SIGPIPE` in the calling thread for the write and consume the one it raised.
+  inside the call instead of receiving the documented `EPIPE`. The startup
+  channel is now a socket pair and both send with `MSG_NOSIGNAL`, which
+  suppresses the signal for that one call without reading or changing any
+  signal mask or disposition.
 
 * The guard helper closed its inherited descriptors before it reset its
   signals, so cleanup's SIGCONT could run an inherited handler in a helper
   that stalled in between, which the 0.11.0 Safety notes rule out. The reset
   now runs first.
-* A helper that could not reset its signals exited without a report, and
-  `ProcessGroupGuard::new` returned `UnexpectedEof`. It now reports the errno,
-  such as `EPERM` from a sandbox that denies `sigaction`.
-* When the owner's SIGCHLD policy could not be read, disarm and drop returned
-  before waiting, and the exited helper stayed a zombie until the owner
-  exited. They still signal nothing, but now reap a helper that a
-  non-consuming `waitid` shows to have exited.
+* A helper that could not complete a required signal reset exited without a
+  report, and `ProcessGroupGuard::new` returned `UnexpectedEof`. It now
+  reports the errno, such as `EPERM` from a sandbox that denies `sigaction`.
 * Once `waitid` had seen the daemon intermediate exit with status 0, every
   failure of the wait that collects it was reported as `InvalidHandshake`. A
   denied wait is again `DaemonError::OperatingSystem` at
@@ -86,10 +97,17 @@ both caused by system calls the owner now makes and 0.10.0 did not.
 * A guard helper no longer terminates on a catchable signal such as `SIGTERM`
   sent to its PID; only owner loss, disarm, `SIGKILL` or a fault ends it. Code
   that stopped a helper that way must drop or disarm the guard instead.
-* `notify_ready` and `fail_and_exit` now call `pthread_sigmask` and
-  `sigpending` in the daemon, and `sigwait` after an `EPIPE`. If the mask
-  cannot be read or changed, the write runs unprotected as in 0.11.0. A
-  sandbox that kills on these calls must permit them.
+* `checked_daemon` now creates its startup channel with `socketpair`, and
+  `notify_ready` and `fail_and_exit` send on it with `sendto`. A sandbox that
+  refuses `socketpair` with an errno gets the pipe of 0.11.0, and one that
+  refuses the send gets a plain `write`; in both a lost invoker raises
+  `SIGPIPE` as before. A sandbox that kills on `socketpair` or `sendto` must
+  permit them.
+* The helper now reads each signal's disposition and sets `SIG_IGN` for
+  signals that were at their default, where 0.11.0 set only handled signals,
+  `SIGCHLD` and `SIGCONT`. A refused setter for a handler-free signal is
+  tolerated, so only a sandbox that kills on such a `sigaction` call is
+  affected.
 
 ## 0.11.0
 

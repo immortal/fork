@@ -18,7 +18,7 @@ use crate::{
     child_signal::Prepared as PreparedSignalState,
     descriptor::{Actions as DescriptorActions, Prepared as PreparedDescriptors},
     pipe_cloexec, process_group_exists,
-    raw::{last_errno, write_all},
+    raw::{last_errno, send_all_nosignal, write_all},
     signal_process_group, wait_event_nohang,
 };
 
@@ -237,10 +237,13 @@ impl DaemonNotifier {
     ///
     /// # Errors
     ///
-    /// Returns the startup-pipe write error, normally `EPIPE` when the invoker
-    /// has already timed out or exited. `SIGPIPE` is blocked in the calling
-    /// thread for the write, so the default [`ChildSignalState::Reset`], which
-    /// restores its terminating action, cannot kill the daemon here instead.
+    /// Returns the startup-channel send error, normally `EPIPE` when the
+    /// invoker has already timed out or exited. The channel is a socket and
+    /// the record is sent with `MSG_NOSIGNAL`, so the default
+    /// [`ChildSignalState::Reset`], which restores the terminating action of
+    /// `SIGPIPE`, cannot kill the daemon here instead, and no signal state is
+    /// touched. Only where a sandbox refused the socket, and the channel fell
+    /// back to the pipe of 0.11.0, does a lost invoker still raise `SIGPIPE`.
     pub fn notify_ready(self) -> io::Result<()> {
         write_record_without_sigpipe(
             self.descriptor.as_raw_fd(),
@@ -395,9 +398,8 @@ impl DaemonPreparation {
     fn new(options: DaemonOptions) -> Result<Self, DaemonError> {
         crate::child_signal::require_waitable_children()
             .map_err(|error| DaemonError::operating_system(DaemonStage::SignalState, error))?;
-        let pipe = pipe_cloexec()
+        let (status_reader, initial_status_writer) = startup_channel()
             .map_err(|error| DaemonError::operating_system(DaemonStage::Handshake, error))?;
-        let (status_reader, initial_status_writer) = pipe.into_parts();
         let (descriptors, status_writer) = options
             .descriptors
             .prepare(initial_status_writer)
@@ -572,9 +574,24 @@ fn write_record(descriptor: RawFd, record: WireRecord) -> Result<(), libc::c_int
     write_all(descriptor, bytes)
 }
 
-/// Write a notifier record so a lost invoker yields `EPIPE`, never `SIGPIPE`.
+/// Send a notifier record so a lost invoker yields `EPIPE`, never `SIGPIPE`.
 fn write_record_without_sigpipe(descriptor: RawFd, record: WireRecord) -> Result<(), libc::c_int> {
-    crate::sigpipe::without_sigpipe(|| write_record(descriptor, record))
+    // SAFETY: record remains live and immutable for the duration of the send.
+    let bytes = unsafe {
+        std::slice::from_raw_parts((&raw const record).cast::<u8>(), size_of::<WireRecord>())
+    };
+    send_all_nosignal(descriptor, bytes)
+}
+
+/// Create the startup channel: a socket pair, so the notifier can suppress
+/// `SIGPIPE` per send. A sandbox that refuses `socketpair` with an errno gets
+/// the pipe 0.11.0 used; every reader and writer works on either.
+fn startup_channel() -> io::Result<(OwnedFd, OwnedFd)> {
+    match crate::socket_pair_cloexec() {
+        Ok(pair) => Ok(pair.into_parts()),
+        Err(error) if error.raw_os_error().is_some() => pipe_cloexec().map(crate::Pipe::into_parts),
+        Err(error) => Err(error),
+    }
 }
 
 fn parent_wait_ready(
