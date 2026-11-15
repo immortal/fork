@@ -636,16 +636,18 @@ fn parent_set_process_group(process: ProcessId, group: ProcessGroup) {
 }
 
 fn read_startup_handshake(descriptor: OwnedFd, timeout: Duration) -> Result<(), SpawnError> {
-    let deadline = Instant::now()
-        .checked_add(timeout)
-        .unwrap_or_else(Instant::now);
+    // A timeout beyond the monotonic clock's range has no reachable deadline:
+    // it waits without bound instead of expiring at once.
+    let deadline = Instant::now().checked_add(timeout);
     let mut poll_descriptor = libc::pollfd {
         fd: descriptor.as_raw_fd(),
         events: libc::POLLIN | libc::POLLHUP,
         revents: 0,
     };
     loop {
-        let remaining = deadline.saturating_duration_since(Instant::now());
+        let remaining = deadline.map_or(Duration::MAX, |deadline| {
+            deadline.saturating_duration_since(Instant::now())
+        });
         let timeout_millis = duration_to_poll_timeout(remaining);
         // SAFETY: poll_descriptor points to one initialized pollfd.
         let result = unsafe { libc::poll(&raw mut poll_descriptor, 1, timeout_millis) };
@@ -653,10 +655,15 @@ fn read_startup_handshake(descriptor: OwnedFd, timeout: Duration) -> Result<(), 
             break;
         }
         if result == 0 {
-            return Err(SpawnError::TimedOut {
-                timeout,
-                cleanup_pending: None,
-            });
+            // One poll covers at most `c_int::MAX` milliseconds, so an expired
+            // poll is a timeout only once the deadline itself has passed.
+            if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                return Err(SpawnError::TimedOut {
+                    timeout,
+                    cleanup_pending: None,
+                });
+            }
+            continue;
         }
         let error = io::Error::last_os_error();
         if error.kind() != io::ErrorKind::Interrupted {
@@ -890,6 +897,23 @@ mod tests {
             duration_to_poll_timeout(Duration::from_secs(u64::MAX)),
             libc::c_int::MAX
         );
+    }
+
+    /// A timeout too large for the monotonic clock must wait, not expire at once.
+    #[test]
+    fn startup_handshake_waits_through_an_unreachable_deadline() -> Result<(), Box<dyn Error>> {
+        let pipe = pipe_cloexec()?;
+        let (reader, writer) = pipe.into_parts();
+        let holder = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(25));
+            drop(writer);
+        });
+        let result = read_startup_handshake(reader, Duration::MAX);
+        holder
+            .join()
+            .map_err(|_| std::io::Error::other("handshake holder panicked"))?;
+        assert!(result.is_ok(), "unbounded handshake failed: {result:?}");
+        Ok(())
     }
 
     #[test]

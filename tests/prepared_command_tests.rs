@@ -124,6 +124,27 @@ fn prepared_command_reports_exact_exit() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+/// `Duration::MAX` exceeds the monotonic clock's range. It must wait for the
+/// handshake rather than time out at once and kill the child.
+#[test]
+fn unbounded_startup_timeout_does_not_expire_at_once() -> Result<(), Box<dyn Error>> {
+    let _lock = test_lock()?;
+    let mut command = PreparedCommand::new("/bin/sh")?;
+    command.arg("-c")?.arg("exit 23")?;
+
+    let child = command.spawn(Duration::MAX)?;
+    let mut guard = ChildGuard::new(child.process());
+    assert_eq!(
+        wait_event(child.process())?,
+        ChildEvent::Exited {
+            pid: child.process(),
+            code: 23,
+        }
+    );
+    guard.mark_reaped();
+    Ok(())
+}
+
 #[test]
 fn exec_failure_is_typed_and_child_is_reaped() -> Result<(), Box<dyn Error>> {
     let _lock = test_lock()?;
