@@ -21,6 +21,16 @@ both caused by system calls the owner now makes and 0.10.0 did not.
   dies while the helper still runs. Cleanup after a failed spawn or daemon dies
   instead of returning its error. No fallback can observe a killing filter, so
   such a policy must permit `waitid`.
+* Guard creation belongs with the `sigaction` changes above: the helper
+  resets its signals with `sigaction` before it reserves the group, so a
+  sandbox that denies `sigaction` makes `ProcessGroupGuard::new` fail where
+  0.10.0, whose helper reset nothing, succeeded. Handlers could otherwise
+  remain in the helper, so creation keeps failing closed.
+* Until a new anchor has exited, or while it is stopped, it holds a copy of
+  the helper's socket. A helper lost in that window gives the owner no end of
+  file, so `new` and `signal_group` return `TimedOut` instead of
+  `UnexpectedEof` or `BrokenPipe`. Nothing is signalled; the error
+  documentation now says so.
 
 ### Fixed
 * `PreparedCommand::spawn` with a timeout beyond the monotonic clock's range,
@@ -47,6 +57,31 @@ both caused by system calls the owner now makes and 0.10.0 did not.
   inside the call instead of receiving the documented `EPIPE`. Both now block
   `SIGPIPE` in the calling thread for the write and consume the one it raised.
 
+* The guard helper closed its inherited descriptors before it reset its
+  signals, so cleanup's SIGCONT could run an inherited handler in a helper
+  that stalled in between, which the 0.11.0 Safety notes rule out. The reset
+  now runs first.
+* A helper that could not reset its signals exited without a report, and
+  `ProcessGroupGuard::new` returned `UnexpectedEof`. It now reports the errno,
+  such as `EPERM` from a sandbox that denies `sigaction`.
+* When the owner's SIGCHLD policy could not be read, disarm and drop returned
+  before waiting, and the exited helper stayed a zombie until the owner
+  exited. They still signal nothing, but now reap a helper that a
+  non-consuming `waitid` shows to have exited.
+* Once `waitid` had seen the daemon intermediate exit with status 0, every
+  failure of the wait that collects it was reported as `InvalidHandshake`. A
+  denied wait is again `DaemonError::OperatingSystem` at
+  `DaemonStage::Handshake`, as in 0.10.0; only `ECHILD` or an unexpected event
+  remains a malformed handshake.
+* Without range closing, an infinite soft `RLIMIT_NOFILE` became a scan floor
+  of `i32::MAX` and the child closed about 2^31 descriptors. An infinite soft
+  limit is now no floor: the descriptor inventory or the hard-limit probe sets
+  the bound, and preparation fails where neither can. No supported platform
+  was found to report that limit.
+* The unit test `failed_intermediate_remains_unreaped_until_cleanup` required
+  the `waitid` retention and failed in a sandbox that denies `waitid` with an
+  errno. It now accepts the documented consuming fallback there.
+
 ### Compatibility
 * A guard helper no longer terminates on a catchable signal such as `SIGTERM`
   sent to its PID; only owner loss, disarm, `SIGKILL` or a fault ends it. Code
@@ -55,52 +90,6 @@ both caused by system calls the owner now makes and 0.10.0 did not.
   `sigpending` in the daemon, and `sigwait` after an `EPIPE`. If the mask
   cannot be read or changed, the write runs unprotected as in 0.11.0. A
   sandbox that kills on these calls must permit them.
-
-### Under review
-Reported by a model review of the released 0.11.0 and not yet changed. Confirm
-each before the next release, then fix it or drop it.
-
-* Signal reset order: the guard helper closes its inherited descriptors before
-  `child_reset_signals`. If guard creation already failed because the helper
-  stalled or was stopped before its reset, cleanup's internal SIGCONT can run
-  the owner's inherited SIGCONT handler inside the helper, which the 0.11.0
-  Safety notes rule out. Resetting signals before the descriptor close removes
-  the window; otherwise narrow those notes.
-* Infinite soft NOFILE: without range closing, the descriptor fallback uses the
-  soft limit, saturated to `i32::MAX`, as its scan floor. The `/dev/fd`
-  inventory and the macOS `kern.maxfilesperproc` cap then never lower the
-  bound, and the child closes about 2^31 descriptors, taking minutes, instead
-  of failing closed as documented. No supported platform was found to report
-  that limit (Linux caps it at `nr_open`, macOS rejects or clamps it, FreeBSD
-  13+ closes ranges), and 0.10.0 behaved the same. Treating an infinite soft
-  limit as no floor would harden it.
-* `failed_intermediate_remains_unreaped_until_cleanup` asserts the
-  `waitid(WNOWAIT)` retention, so it fails in a sandbox that denies `waitid`
-  with an errno, where the documented consuming fallback is correct. The test
-  should accept the fallback outcome.
-* Error kinds: until a new anchor's initial exit, or while it is stopped, it
-  holds a copy of the helper's socket. A helper lost in that window gives the
-  owner no end of file, so `new` and `signal_group` return `TimedOut` instead
-  of the documented `UnexpectedEof` or `BrokenPipe`. Nothing is signalled; only
-  the reported error kind differs.
-* Daemon handshake error: once `waitid(WNOWAIT)` has seen the intermediate
-  exit with status 0, checked daemonization collects it with a non-blocking
-  wait and maps every failure of that wait to `InvalidHandshake`. A sandbox
-  that permits `waitid` but denies `waitpid` therefore reports a malformed
-  handshake instead of `DaemonError::OperatingSystem` at
-  `DaemonStage::Handshake`, which 0.10.0 returned for the same wait error. The
-  call still fails; only the reported error differs.
-* Guard creation and `sigaction`: the helper now resets every signal
-  disposition with `sigaction` before it reserves the group and exits if a
-  call fails, so in a sandbox that denies `sigaction`
-  `ProcessGroupGuard::new` returns `UnexpectedEof` where 0.10.0, whose helper
-  reset nothing, succeeded. If confirmed, the Documentation entry above should
-  list guard creation with the other `sigaction` changes.
-* Unreaped helper: disarm and drop check the SIGCHLD disposition before they
-  wait for the helper. When that `sigaction` query fails they return without
-  the exact-child wait, so the helper, which still exits, stays a zombie until
-  the owner exits. Signalling nothing is the documented fail-closed behavior,
-  but an exact-child wait sends no signal and could still collect it.
 
 ## 0.11.0
 
