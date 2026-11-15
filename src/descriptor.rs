@@ -219,7 +219,7 @@ fn descriptor_close_plan() -> io::Result<ClosePlan> {
     if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &raw mut limit) } == -1 {
         return Err(io::Error::last_os_error());
     }
-    let soft_limit = bounded_descriptor_limit(limit.rlim_cur)?;
+    let soft_limit = scan_floor(limit.rlim_cur)?;
     if range_closing_available() {
         return Ok(ClosePlan::Ranges);
     }
@@ -243,6 +243,19 @@ fn descriptor_close_plan() -> io::Result<ClosePlan> {
         soft_limit,
         finite_hard_limit(limit.rlim_max)?,
     )))
+}
+
+/// The lowest scan bound the soft limit justifies.
+///
+/// A finite soft limit bounds every descriptor opened under it, so a scan
+/// covers at least that range. An infinite one bounds nothing: used as a
+/// floor it would make the child close about 2^31 descriptors. It is no floor
+/// at all, and the inventory or the hard-limit probe alone sets the bound.
+fn scan_floor(soft: libc::rlim_t) -> io::Result<RawFd> {
+    if soft == libc::RLIM_INFINITY {
+        return Ok(0);
+    }
+    bounded_descriptor_limit(soft)
 }
 
 /// Establish a finite ceiling without opening anything. On Linux a finite
@@ -436,7 +449,20 @@ pub(crate) fn close_raw(descriptor: RawFd) {
 
 #[cfg(test)]
 mod tests {
-    use super::{bounded_descriptor_limit, inventory_limit};
+    use super::{bounded_descriptor_limit, inventory_limit, scan_floor};
+
+    /// An infinite soft limit must not become a 2^31-descriptor scan floor.
+    #[test]
+    fn infinite_soft_limit_is_no_scan_floor() -> std::io::Result<()> {
+        assert_eq!(scan_floor(libc::RLIM_INFINITY)?, 0);
+        assert_eq!(scan_floor(1024)?, 1024);
+        let entries = ["0", "1", "2", "7"].map(|name| Ok(name.into()));
+        assert_eq!(
+            inventory_limit(scan_floor(libc::RLIM_INFINITY)?, entries.into_iter())?,
+            8
+        );
+        Ok(())
+    }
 
     #[test]
     fn inventory_limit_propagates_iteration_failure() {
