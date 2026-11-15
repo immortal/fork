@@ -1,4 +1,4 @@
-## Unreleased
+## 0.12.0 Unreleased
 
 ### Documentation
 The 0.11.0 compatibility audit below omitted two success-to-failure changes,
