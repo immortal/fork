@@ -67,6 +67,26 @@ each before the next release, then fix it or drop it.
   the exact-child wait, so the helper, which still exits, stays a zombie until
   the owner exits. Signalling nothing is the documented fail-closed behavior,
   but an exact-child wait sends no signal and could still collect it.
+* Helper and the owner's group: the guard helper stays in the owner's process
+  group and resets every handled signal to its default action. A signal sent
+  to that group, such as a terminal interrupt or `kill -TERM -<pgid>`, kills
+  the helper while an owner that handles the signal survives. `signal_group`
+  then returns `BrokenPipe`, and the workload outlives the owner uncontained.
+  Reproduced on Linux. Ignoring catchable signals in the helper, or moving it
+  out of the owner's group, would keep the guard; otherwise document it.
+* Unbounded spawn timeout: `PreparedCommand::spawn(Duration::MAX)` returns
+  `TimedOut` at once and kills the child, because an overflowing deadline
+  falls back to the current instant. Checked daemonization saturates and the
+  guard rejects such a timeout. Reproduced on Linux.
+* Readiness and `SIGPIPE`: `DaemonNotifier::notify_ready` and `fail_and_exit`
+  use a plain `write`. The default `ChildSignalState::Reset` restores
+  `SIGPIPE`, so a daemon whose invoker is gone is killed inside the call
+  instead of receiving the documented `EPIPE`. Reproduced on Linux.
+* Repeated helper cleanup: `disarm` cleans up the helper and then drops it,
+  and the drop repeats the cleanup against the already reaped PID. The second
+  wait normally fails with `ECHILD`; in a multithreaded owner that reused the
+  PID for a new child, that child could receive `SIGCONT` or `SIGKILL`. Found
+  by reading the code, not reproduced.
 
 ## 0.11.0
 
