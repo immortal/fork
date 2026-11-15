@@ -760,10 +760,11 @@ fn child_reset_signals(known: KnownSignals) -> Result<(), libc::c_int> {
     {
         return Err(crate::raw::last_errno());
     }
-    // A signal set has at least one bit per supported signal on our Unix
-    // targets. Cover the entire representable range, including realtime and
-    // platform-specific signals.
-    for signal in 1..=size_of::<libc::sigset_t>() * 8 {
+    // Cover every number a signal set can represent, including realtime and
+    // platform-specific signals, and every known signal beyond that: 32-bit
+    // Android keeps a one-word `sigset_t` although its realtime signals are
+    // numbered above it.
+    for signal in 1..=known.scan_end() {
         let Ok(signal) = libc::c_int::try_from(signal) else {
             return Err(libc::EINVAL);
         };
@@ -838,9 +839,9 @@ struct KnownSignals {
 }
 
 impl KnownSignals {
-    /// Linux: the realtime range the C library exposes, which starts after
-    /// the numbers it reserves for itself.
-    #[cfg(target_os = "linux")]
+    /// Linux and Android: the realtime range the C library exposes, which
+    /// starts after the numbers it reserves for itself.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     fn prepare() -> Self {
         Self {
             first: libc::SIGRTMIN(),
@@ -860,9 +861,16 @@ impl KnownSignals {
 
     /// Elsewhere no signal above the standard ones is known to be supported;
     /// macOS has none at all.
-    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+    #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "freebsd")))]
     const fn prepare() -> Self {
         Self { first: 1, last: 0 }
+    }
+
+    /// The last number the reset visits: whichever is larger, what a signal
+    /// set represents or the last known signal.
+    fn scan_end(self) -> usize {
+        let representable = size_of::<libc::sigset_t>() * 8;
+        usize::try_from(self.last).map_or(representable, |last| last.max(representable))
     }
 
     /// Whether `EINVAL` for `signal` can only be a refusal.

@@ -192,19 +192,26 @@ fn known_signals_cover_the_standard_and_realtime_ranges() {
     for signal in [libc::SIGHUP, libc::SIGUSR1, libc::SIGTERM, 31] {
         assert!(known.must_exist(signal));
     }
-    #[cfg(target_os = "linux")]
+    assert!(known.scan_end() >= size_of::<libc::sigset_t>() * 8);
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     {
+        assert!(known.scan_end() >= usize::try_from(libc::SIGRTMAX()).unwrap_or(usize::MAX));
         assert!(known.must_exist(libc::SIGRTMIN()));
         assert!(known.must_exist(libc::SIGRTMAX()));
         // The C library reserves the first realtime numbers for itself.
         assert!(!known.must_exist(32));
         assert!(!known.must_exist(libc::SIGRTMAX() + 1));
     }
+    // FreeBSD accepts every number up to 128 except 32, which libthr
+    // reserves; its named realtime range is 65 to 126. The libc crate exports
+    // no constants for them.
     #[cfg(target_os = "freebsd")]
     {
-        assert!(known.must_exist(libc::SIGRTMIN));
-        assert!(known.must_exist(libc::SIGRTMAX));
+        for signal in [33, 65, 126, 128] {
+            assert!(known.must_exist(signal));
+        }
         assert!(!known.must_exist(32));
+        assert!(!known.must_exist(129));
     }
     #[cfg(target_vendor = "apple")]
     assert!(!known.must_exist(32));

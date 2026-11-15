@@ -116,8 +116,8 @@ both caused by system calls the owner now makes and 0.10.0 did not.
   tolerated, so only a sandbox that kills on such a `sigaction` call is
   affected; that too is a deliberate exception, accepted so a signal sent to
   the owner's group cannot end the helper. Reading the disposition of a
-  standard signal, or of one in the realtime range of Linux and FreeBSD, must
-  now succeed: 0.11.0 skipped a signal whose query answered `EINVAL` and
+  standard signal, or of one in the realtime range of Linux, Android and
+  FreeBSD, must now succeed: 0.11.0 skipped a signal whose query answered `EINVAL` and
   could leave its handler in the helper.
 
 ## 0.11.0
