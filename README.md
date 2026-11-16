@@ -339,8 +339,8 @@ the anchor, and waits for helper cleanup under the deadline described below.
   anything else, the helper removes every application handler and ignores
   every catchable signal except `SIGCHLD` (default to retain the zombie),
   `SIGCONT` (default for cleanup) and the fault signals (`SIGABRT`, `SIGBUS`,
-  `SIGFPE`, `SIGILL`, `SIGSEGV`, `SIGSYS`, `SIGTRAP` and, where it exists,
-  `SIGEMT`), which keep their default action so a broken helper still dies,
+  `SIGFPE`, `SIGILL`, `SIGSEGV`, `SIGSYS`, `SIGTRAP` and, on the BSDs and
+  macOS, `SIGEMT`), which keep their default action so a broken helper still dies,
   unless the owner ignored one, which then stays ignored.
   The helper shares the owner's process group, so this is what keeps a signal
   sent to that group, such as a terminal interrupt, from ending the helper
@@ -635,14 +635,10 @@ See [`tests/README.md`](tests/README.md) for detailed information about integrat
 
 ## Platform Support
 
-This library is designed for Unix-like operating systems:
-
-- ✅ Linux
-- ✅ macOS
-- ✅ FreeBSD
-- ✅ NetBSD
-- ✅ OpenBSD
-- ❌ Windows (not supported)
+See [Supported platforms](#supported-platforms): Linux, FreeBSD, and macOS are
+supported and tested. Other Unix targets such as NetBSD and OpenBSD may
+compile but are untested and unclaimed, and Android and Windows are not
+supported.
 
 ## Documentation
 

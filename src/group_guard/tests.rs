@@ -216,3 +216,73 @@ fn known_signals_cover_the_standard_and_realtime_ranges() {
     #[cfg(target_vendor = "apple")]
     assert!(!known.must_exist(32));
 }
+
+fn scripted_reap(
+    events: Vec<std::io::Result<crate::ChildEvent>>,
+) -> (Result<(), super::HelperWaitFailure>, usize) {
+    let mut events = events.into_iter();
+    let mut waits = 0;
+    let outcome = super::reap_killed(|| {
+        waits += 1;
+        events
+            .next()
+            .unwrap_or_else(|| Err(std::io::Error::other("no further event")))
+    });
+    (outcome, waits)
+}
+
+/// Regression: one wait followed the `SIGKILL`, and it also reports stop and
+/// continue events. A continue still queued from cleanup's resume was taken
+/// for a failed reap; in a drop nothing retried it, so the killed helper
+/// stayed a zombie until the owner exited.
+#[test]
+fn a_queued_continue_does_not_end_the_reap_of_a_killed_helper() {
+    let pid = crate::current_process_id();
+    let continued = || Ok(crate::ChildEvent::Continued { pid });
+    let killed = || {
+        Ok(crate::ChildEvent::Signalled {
+            pid,
+            signal: crate::Signal::KILL,
+        })
+    };
+
+    let (outcome, waits) = scripted_reap(vec![continued(), killed()]);
+    assert!(outcome.is_ok(), "{outcome:?}");
+    assert_eq!(waits, 2);
+
+    let (outcome, waits) = scripted_reap(vec![killed()]);
+    assert!(outcome.is_ok(), "{outcome:?}");
+    assert_eq!(waits, 1);
+}
+
+/// A stop is not waited through, since a traced helper can hold its exit
+/// stop indefinitely; endless continues are bounded; and `ECHILD` still
+/// means the PID is gone.
+#[test]
+fn a_killed_helper_that_does_not_exit_is_reported_without_another_wait() {
+    let pid = crate::current_process_id();
+    let stopped = Ok(crate::ChildEvent::Stopped {
+        pid,
+        signal: crate::Signal::STOP,
+    });
+    let (outcome, waits) = scripted_reap(vec![stopped]);
+    assert!(matches!(
+        outcome,
+        Err(super::HelperWaitFailure::Unobserved(_))
+    ));
+    assert_eq!(waits, 1);
+
+    let endless = (0..64)
+        .map(|_| Ok(crate::ChildEvent::Continued { pid }))
+        .collect();
+    let (outcome, waits) = scripted_reap(endless);
+    assert!(matches!(
+        outcome,
+        Err(super::HelperWaitFailure::Unobserved(_))
+    ));
+    assert_eq!(waits, 9);
+
+    let gone = Err(std::io::Error::from_raw_os_error(libc::ECHILD));
+    let (outcome, _) = scripted_reap(vec![gone]);
+    assert!(matches!(outcome, Err(super::HelperWaitFailure::Reaped(_))));
+}

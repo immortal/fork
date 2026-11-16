@@ -403,14 +403,38 @@ impl GuardHelper {
             Ok(None) => {}
             Err(error) => return Err(wait_failure(error)),
         }
-        match wait_event(self.process) {
-            Ok(event) if event.is_terminal() => Ok(()),
-            Ok(_) => Err(HelperWaitFailure::Unobserved(io::Error::other(
-                "process-group helper changed state without exiting after SIGKILL",
-            ))),
-            Err(error) => Err(wait_failure(error)),
+        reap_killed(|| wait_event(self.process))
+    }
+}
+
+/// Continue events a killed helper may report before its exit is given up on.
+const MAX_CONTINUES_AFTER_KILL: u32 = 8;
+
+/// Collect a helper that was just sent `SIGKILL`, using `wait` for each event.
+///
+/// A continue event that was still queued when the kill was sent is not the
+/// reap. It is consumed and the wait repeated: a drop has no later attempt,
+/// so stopping there would leave the killed helper a zombie. A stop event
+/// still ends the attempt, because a traced helper stops at exit until its
+/// tracer lets it go and another wait would block.
+fn reap_killed(
+    mut wait: impl FnMut() -> io::Result<crate::ChildEvent>,
+) -> Result<(), HelperWaitFailure> {
+    for _ in 0..=MAX_CONTINUES_AFTER_KILL {
+        match wait() {
+            Ok(event) if event.is_terminal() => return Ok(()),
+            Ok(crate::ChildEvent::Continued { .. }) => {}
+            Ok(_) => {
+                return Err(HelperWaitFailure::Unobserved(io::Error::other(
+                    "process-group helper changed state without exiting after SIGKILL",
+                )));
+            }
+            Err(error) => return Err(wait_failure(error)),
         }
     }
+    Err(HelperWaitFailure::Unobserved(io::Error::other(
+        "process-group helper kept resuming without exiting after SIGKILL",
+    )))
 }
 
 /// Classify a failed wait or ownership check: `ECHILD` proves the PID is no

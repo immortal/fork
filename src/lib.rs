@@ -258,13 +258,10 @@
 //!
 //! # Platform Compatibility
 //!
-//! This library uses POSIX system calls and is designed for Unix-like systems:
-//! - Linux (all distributions)
-//! - macOS (10.5+, replacement for deprecated `daemon(3)`)
-//! - FreeBSD, OpenBSD, NetBSD
-//! - Other POSIX-compliant systems
-//!
-//! Windows is **not supported** as it lacks `fork()` system call.
+//! This library uses POSIX system calls. Linux, FreeBSD, and macOS are the
+//! supported platforms and the ones its test suite runs on. Other Unix targets
+//! such as NetBSD and OpenBSD may compile but are untested and unclaimed.
+//! Android is not supported, and neither is Windows, which lacks `fork()`.
 
 use std::io;
 

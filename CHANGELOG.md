@@ -56,7 +56,9 @@ both caused by system calls the owner now makes and 0.10.0 did not.
   reaped or is no longer a child (`ECHILD`), at whichever step that shows. A
   cleanup that was refused before it could wait, whose wait failed without
   consuming anything, or that saw the helper stop again after `SIGKILL`, is
-  still retried on drop.
+  still retried on drop. A continue event that was still queued when the
+  kill was sent is consumed and the wait repeated, so it cannot leave the
+  killed helper unreaped.
 * The guard helper shares the owner's process group and used to restore the
   default action of every signal the owner handled. A signal sent to that
   group, such as a terminal interrupt or `kill -TERM -<pgid>`, then killed the
@@ -64,8 +66,8 @@ both caused by system calls the owner now makes and 0.10.0 did not.
   `BrokenPipe` and the workload outlived the owner uncontained. The helper now
   ignores every signal except `SIGCHLD` and `SIGCONT`, which the pin and
   cleanup's resume need, and the fault signals `SIGABRT`, `SIGBUS`, `SIGFPE`,
-  `SIGILL`, `SIGSEGV`, `SIGSYS`, `SIGTRAP` and, where it exists, `SIGEMT`,
-  which keep their default action unless the owner ignored one: that one
+  `SIGILL`, `SIGSEGV`, `SIGSYS`, `SIGTRAP` and, on the BSDs and macOS,
+  `SIGEMT`, which keep their default action unless the owner ignored one: that one
   stays ignored, as in 0.11.0. It still exits when the owner closes or loses
   the socket, and `SIGKILL` and `SIGSTOP` stay effective. `SIGCHLD` and
   `SIGCONT` are set without reading them, and setting them, reading the
@@ -107,12 +109,14 @@ both caused by system calls the owner now makes and 0.10.0 did not.
   sent to its PID; only owner loss, disarm, `SIGKILL` or a fault ends it. Code
   that stopped a helper that way must drop or disarm the guard instead.
 * `checked_daemon` now creates its startup channel with `socketpair`, and
-  `notify_ready` and `fail_and_exit` send on it with `sendto`. A sandbox that
+  `notify_ready` and `fail_and_exit` send on it with `send`, which is the
+  `sendto` system call on Linux and a system call of its own on FreeBSD and
+  macOS. A sandbox that
   refuses `socketpair` with an errno gets the pipe of 0.11.0. A first send
   that fails with any errno other than `EPIPE`, `ECONNRESET` or `ENOTCONN`,
   or that is interrupted nine times in a row, is repeated as a plain `write`. On both fallbacks a lost invoker raises
   `SIGPIPE` as before. No errno fallback can observe a killing filter: a
-  sandbox that kills on `socketpair` or `sendto` terminates the invoker or
+  sandbox that kills on `socketpair` or on that send terminates the invoker or
   the daemon where 0.11.0 succeeded, and must permit them. This is a
   deliberate exception to the no-new-system-call rule, accepted for the
   `EPIPE` contract above.
