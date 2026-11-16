@@ -49,6 +49,66 @@ fn notifier_reports_a_lost_invoker_without_sigpipe() -> std::io::Result<()> {
     Ok(())
 }
 
+/// A notifier in a forked child whose invoker is already gone, with SIGPIPE
+/// at its default action as `ChildSignalState::Reset` leaves it. `report`
+/// runs in the child with that notifier; the child's wait event is returned.
+fn lost_invoker_event(
+    report: fn(super::DaemonNotifier) -> libc::c_int,
+) -> std::io::Result<crate::ChildEvent> {
+    let (reader, writer) = super::startup_channel()?;
+    // No reader may remain anywhere, or the child's send would succeed.
+    drop(reader);
+    let process = match crate::fork_process()? {
+        crate::ProcessFork::Parent(process) => process,
+        crate::ProcessFork::Child => {
+            // SAFETY: restores the default action in this test child only.
+            unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
+            let notifier = super::DaemonNotifier {
+                descriptor: writer,
+                process: super::DaemonProcess {
+                    process: crate::current_process_id(),
+                    process_group: crate::current_process_group_id(),
+                },
+            };
+            let code = report(notifier);
+            // SAFETY: the test child must not run the harness's destructors.
+            unsafe { libc::_exit(code) }
+        }
+    };
+    drop(writer);
+    crate::wait_event(process)
+}
+
+/// The public `notify_ready` must return `EPIPE` to a daemon whose invoker
+/// timed out or exited, not let `SIGPIPE` kill it.
+#[test]
+fn notify_ready_returns_epipe_when_the_invoker_is_gone() -> std::io::Result<()> {
+    let event = lost_invoker_event(|notifier| {
+        let outcome = notifier.notify_ready();
+        i32::from(outcome.err().and_then(|error| error.raw_os_error()) != Some(libc::EPIPE))
+    })?;
+    assert!(
+        matches!(event, crate::ChildEvent::Exited { code: 0, .. }),
+        "notify_ready did not report EPIPE cleanly: {event:?}"
+    );
+    Ok(())
+}
+
+/// The public `fail_and_exit` must end the daemon with its failure status
+/// when the invoker is gone, not with a `SIGPIPE` death.
+#[test]
+fn fail_and_exit_exits_with_its_status_when_the_invoker_is_gone() -> std::io::Result<()> {
+    let event = lost_invoker_event(|notifier| {
+        notifier.fail_and_exit(&std::io::Error::from_raw_os_error(libc::ENOENT))
+    })?;
+    let expected = u8::try_from(super::FAILURE_EXIT).map_err(std::io::Error::other)?;
+    assert!(
+        matches!(event, crate::ChildEvent::Exited { code, .. } if code == expected),
+        "fail_and_exit did not exit with its failure status: {event:?}"
+    );
+    Ok(())
+}
+
 /// Where a sandbox refused the socket the channel is the pipe of 0.11.0; the
 /// notifier must still deliver its record through it.
 #[test]
