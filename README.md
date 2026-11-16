@@ -41,7 +41,7 @@ Add `fork` to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-fork = "0.11.0"
+fork = "0.12.0"
 ```
 
 Or use cargo-add:
